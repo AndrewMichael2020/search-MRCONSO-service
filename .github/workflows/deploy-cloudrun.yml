@@ -10,6 +10,7 @@ on:
       - 'cppmatch.cpp'
       - 'requirements.txt'
       - 'setup.py'
+      - '.dockerignore'
 
 jobs:
   deploy:
@@ -19,10 +20,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: 🧾 Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: 🔑 Authenticate to Google Cloud
         id: auth
         uses: google-github-actions/auth@v3
         with:
@@ -30,32 +31,33 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SA_EMAIL }}
 
-      - name: Set up Cloud SDK
+      - name: ☁️ Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Ensure required APIs are enabled
+      - name: ✅ Enable required APIs
         run: |
-          gcloud services enable \
-            run.googleapis.com \
-            iamcredentials.googleapis.com \
-            artifactregistry.googleapis.com
+          echo "🔧 Enabling Cloud Run, IAM Credentials, and Artifact Registry APIs..."
+          gcloud services enable run.googleapis.com iamcredentials.googleapis.com artifactregistry.googleapis.com
 
-      - name: Configure Docker for Artifact Registry
-        run: gcloud --quiet auth configure-docker northamerica-northeast1-docker.pkg.dev
+      - name: 🧰 Configure Docker for Artifact Registry
+        run: |
+          echo "🔧 Configuring Docker for Artifact Registry..."
+          gcloud --quiet auth configure-docker northamerica-northeast1-docker.pkg.dev
 
-      - name: Build and push Docker image
+      - name: 🧱 Build and push Docker image
         env:
           IMAGE: ${{ secrets.GCP_ARTIFACT_REPO }}/${{ secrets.SERVICE_NAME }}:${{ github.sha }}-${{ secrets.DEPLOY_ENV }}
         run: |
-          echo "Building image: $IMAGE"
+          echo "🏗️ Building image: $IMAGE"
           docker build -t "$IMAGE" .
+          echo "🚀 Pushing image to Artifact Registry..."
           docker push "$IMAGE"
 
-      - name: Deploy to Cloud Run
+      - name: ☁️ Deploy to Cloud Run
         env:
           IMAGE: ${{ secrets.GCP_ARTIFACT_REPO }}/${{ secrets.SERVICE_NAME }}:${{ github.sha }}-${{ secrets.DEPLOY_ENV }}
         run: |
-          echo "Deploying $IMAGE to Cloud Run..."
+          echo "🚀 Deploying $IMAGE to Cloud Run..."
           gcloud run deploy ${{ secrets.SERVICE_NAME }} \
             --image "$IMAGE" \
             --region=${{ secrets.GCP_REGION }} \
@@ -63,11 +65,18 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --set-env-vars LOG_LEVEL=${{ secrets.GCP_LOG_LEVEL }},DEPLOY_ENV=${{ secrets.DEPLOY_ENV }}
+          echo "✅ Deployment command executed."
 
-      - name: Verify Deployment
+      - name: 🔍 Verify Deployment
         run: |
-          echo "Verifying deployment..."
-          gcloud run services describe ${{ secrets.SERVICE_NAME }} \
+          echo "🔍 Checking service status..."
+          URL=$(gcloud run services describe ${{ secrets.SERVICE_NAME }} \
             --region=${{ secrets.GCP_REGION }} \
             --project=${{ secrets.GCP_PROJECT_ID }} \
-            --format="value(status.url)"
+            --format="value(status.url)")
+          if [ -z "$URL" ]; then
+            echo "❌ No URL found — deployment may have failed."
+            exit 1
+          fi
+          echo "✅ Service deployed successfully!"
+          echo "🌐 URL: $URL"
