@@ -18,7 +18,7 @@
 *.pdb
 
 # Compiled Dynamic libraries
-*.so
+#*.so
 *.dylib
 *.dll
 
@@ -47,7 +47,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
+# *.so
 .Python
 build/
 develop-eggs/
@@ -84,8 +84,8 @@ ENV/
 data/mrconso_sample.txt
 
 # Build artifacts
-cppmatch.*.so
-cppmatch.*.pyd
+# cppmatch.*.so
+# cppmatch.*.pyd
 
 # Temporary files
 /tmp/
