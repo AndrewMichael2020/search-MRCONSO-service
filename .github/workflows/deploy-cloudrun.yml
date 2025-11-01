@@ -46,15 +46,28 @@ jobs:
       - name: ☁️ Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: 🔧 Set GCP Project
+        run: |
+          gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+          echo "✅ GCP Project set to: ${{ secrets.GCP_PROJECT_ID }}"
+
       - name: ✅ Enable required APIs
         run: |
           gcloud services enable \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             run.googleapis.com \
             iamcredentials.googleapis.com \
             artifactregistry.googleapis.com
 
+      - name: 🔍 Verify authentication and permissions
+        run: |
+          echo "🔍 Checking authentication status..."
+          gcloud auth list --filter=status:ACTIVE --format="value(account)"
+          echo "🔍 Checking service account access token..."
+          gcloud auth application-default print-access-token > /dev/null && echo "✅ Access token obtained successfully" || echo "❌ Failed to obtain access token"
+
       - name: 🧰 Configure Docker for Artifact Registry
-        run: gcloud --quiet auth configure-docker northamerica-northeast1-docker.pkg.dev
+        run: gcloud --quiet auth configure-docker northamerica-northeast1-docker.pkg.dev --project=${{ secrets.GCP_PROJECT_ID }}
 
       - name: 🧱 Build and push Docker image
         env:
