@@ -244,6 +244,21 @@ gcloud iam service-accounts add-iam-policy-binding \
   --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/attribute.repository/AndrewMichael2020/search-MRCONSO-service"
 ```
 
+**Note:** Replace `PROJECT_NUMBER` with your actual GCP project number, which you can get with:
+```bash
+gcloud projects describe $PROJECT_ID --format='value(projectNumber)'
+```
+
+**Important:** The workflow uses Application Default Credentials (ADC) for authentication. If you need to use explicit access tokens (by adding `token_format: access_token` to the auth step), you must also grant the service account permission to impersonate itself:
+
+```bash
+# Only needed if using token_format: access_token
+gcloud iam service-accounts add-iam-policy-binding \
+  github-actions-sa@$PROJECT_ID.iam.gserviceaccount.com \
+  --role="roles/iam.serviceAccountTokenCreator" \
+  --member="serviceAccount:github-actions-sa@$PROJECT_ID.iam.gserviceaccount.com"
+```
+
 ### Configure GitHub Secrets
 
 Add these secrets to your GitHub repository (Settings → Secrets and variables → Actions):
