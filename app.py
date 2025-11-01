@@ -1,6 +1,11 @@
 """
 FastAPI app for BK-tree vs Python fuzzy search on MRCONSO terms.
-Endpoints: /healthz, /search/bktree, /search/python, /benchmarks/run
+Endpoints:
+  /healthz
+  /load              -> trigger MRCONSO load (manual or from startup task)
+  /search/bktree
+  /search/python
+  /benchmarks/run
 """
 
 import os
@@ -12,10 +17,11 @@ from cppmatch import BKTree
 from rapidfuzz.distance import Levenshtein
 
 # Create FastAPI app
-app = FastAPI(title="BKTree vs Python Search", version="0.1.1")
+app = FastAPI(title="BKTree vs Python Search", version="0.2.0")
 
 TERMS = []
 TREE = BKTree()
+LOADED = False
 
 
 class SearchReq(BaseModel):
@@ -23,33 +29,41 @@ class SearchReq(BaseModel):
     maxdist: int = 1
 
 
-@app.on_event("startup")
-async def startup():
-    """Load terms from MRCONSO.RRF and build BK-tree index."""
-    global TERMS, TREE
+def load_terms():
+    """Load MRCONSO terms from local or GCS file and build BK-tree index."""
+    global TERMS, TREE, LOADED
+
+    if LOADED:
+        print("MRCONSO already loaded.")
+        return len(TERMS)
 
     path = os.getenv("MRCONSO_PATH", "data/umls/2025AA/META/MRCONSO.RRF")
+    print(f"Loading MRCONSO from {path} ...")
 
-    # Fallback for Cloud Run deployments
-    if not os.path.exists(path):
-        print(f"[WARN] MRCONSO file not found at {path}. Using empty TERMS.")
-        TERMS = []
-        return
+    text_lines = []
+    if path.startswith("gs://"):
+        from google.cloud import storage
+        client = storage.Client()
+        bucket_name, blob_name = path.replace("gs://", "").split("/", 1)
+        blob = client.bucket(bucket_name).blob(blob_name)
+        print("Downloading MRCONSO.RRF from GCS (this may take a while)...")
+        data = blob.download_as_text(encoding="utf-8", errors="ignore").splitlines()
+        text_lines = data
+    elif os.path.exists(path):
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            text_lines = f.readlines()
+    else:
+        raise RuntimeError(f"MRCONSO file not found at {path}")
 
-    print(f"Loading terms from {path} ...")
     skipped = 0
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            if "|" not in line:
-                skipped += 1
-                continue
-            parts = line.split("|")
-            if len(parts) > 14:
-                term = parts[14].strip()
-                if term:
-                    TERMS.append(term)
-            else:
-                skipped += 1
+    for line in text_lines:
+        parts = line.split("|")
+        if len(parts) > 14:
+            term = parts[14].strip()
+            if term:
+                TERMS.append(term)
+        else:
+            skipped += 1
 
     print(f"Loaded {len(TERMS)} terms (skipped {skipped})")
 
@@ -59,10 +73,24 @@ async def startup():
         TREE.insert(t)
     print(f"BK-tree built in {time.time() - t0:.2f}s")
 
+    LOADED = True
+    return len(TERMS)
+
 
 @app.get("/healthz")
 async def health():
-    return {"status": "ok", "terms": len(TERMS)}
+    """Check readiness of the app."""
+    return {"status": "ok", "terms": len(TERMS), "loaded": LOADED}
+
+
+@app.post("/load")
+async def trigger_load():
+    """Trigger MRCONSO load manually (to avoid Cloud Run timeout)."""
+    try:
+        count = load_terms()
+        return {"status": "loaded", "terms": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/search/bktree")
@@ -106,7 +134,7 @@ async def run_benchmarks():
     }
 
 
-# For local testing (Cloud Run uses Gunicorn automatically)
+# Local test entrypoint (Cloud Run uses Gunicorn)
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8080))
