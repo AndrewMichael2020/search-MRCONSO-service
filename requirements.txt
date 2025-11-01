@@ -5,3 +5,5 @@ rapidfuzz
 pandas
 pytest
 python-dotenv
+flask
+gunicorn

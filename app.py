@@ -2,30 +2,39 @@
 FastAPI app for BK-tree vs Python fuzzy search on MRCONSO terms.
 Endpoints: /healthz, /search/bktree, /search/python, /benchmarks/run
 """
-import os, random, time
+
+import os
+import random
+import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from cppmatch import BKTree
 from rapidfuzz.distance import Levenshtein
 
+# Create FastAPI app
 app = FastAPI(title="BKTree vs Python Search", version="0.1.1")
 
 TERMS = []
 TREE = BKTree()
 
+
 class SearchReq(BaseModel):
     query: str
     maxdist: int = 1
+
 
 @app.on_event("startup")
 async def startup():
     """Load terms from MRCONSO.RRF and build BK-tree index."""
     global TERMS, TREE
 
-    # pick up path from env var or fallback to default
     path = os.getenv("MRCONSO_PATH", "data/umls/2025AA/META/MRCONSO.RRF")
+
+    # Fallback for Cloud Run deployments
     if not os.path.exists(path):
-        raise RuntimeError(f"MRCONSO file missing: {path}")
+        print(f"[WARN] MRCONSO file not found at {path}. Using empty TERMS.")
+        TERMS = []
+        return
 
     print(f"Loading terms from {path} ...")
     skipped = 0
@@ -35,7 +44,6 @@ async def startup():
                 skipped += 1
                 continue
             parts = line.split("|")
-            # MRCONSO term string at position 14 (STR)
             if len(parts) > 14:
                 term = parts[14].strip()
                 if term:
@@ -49,11 +57,13 @@ async def startup():
     t0 = time.time()
     for t in TERMS:
         TREE.insert(t)
-    print(f"BK-tree built in {time.time()-t0:.2f} s")
+    print(f"BK-tree built in {time.time() - t0:.2f}s")
+
 
 @app.get("/healthz")
 async def health():
     return {"status": "ok", "terms": len(TERMS)}
+
 
 @app.post("/search/bktree")
 async def search_bktree(req: SearchReq):
@@ -62,6 +72,7 @@ async def search_bktree(req: SearchReq):
     res = TREE.search(req.query, req.maxdist)
     return {"matches": [{"term": t, "distance": d} for t, d in res]}
 
+
 @app.post("/search/python")
 async def search_python(req: SearchReq):
     if not TERMS:
@@ -69,6 +80,7 @@ async def search_python(req: SearchReq):
     best = min(TERMS, key=lambda t: Levenshtein.distance(req.query, t))
     dist = int(Levenshtein.distance(req.query, best))
     return {"matches": [{"term": best, "distance": dist}]}
+
 
 @app.post("/benchmarks/run")
 async def run_benchmarks():
@@ -90,5 +102,12 @@ async def run_benchmarks():
         "queries": len(sample),
         "bktree_sec": round(bkt_time, 3),
         "python_sec": round(py_time, 3),
-        "ratio_python_over_bktree": round(py_time / max(bkt_time, 1e-9), 2)
+        "ratio_python_over_bktree": round(py_time / max(bkt_time, 1e-9), 2),
     }
+
+
+# For local testing (Cloud Run uses Gunicorn automatically)
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)

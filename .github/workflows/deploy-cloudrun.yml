@@ -1,7 +1,29 @@
 name: Deploy to Cloud Run
 
+# This workflow is intended to be used as a reusable workflow (called via `uses:`)
+# Declare the secrets it expects so callers can pass them (or use `secrets: inherit`).
 on:
   workflow_call:
+    # Reusable workflows must declare which secrets they accept. Caller can pass
+    # them explicitly or use `secrets: inherit` when calling the workflow.
+    secrets:
+      GCP_WORKLOAD_IDENTITY_PROVIDER:
+        required: true
+      GCP_SA_EMAIL:
+        required: true
+      GCP_ARTIFACT_REPO:
+        required: true
+      SERVICE_NAME:
+        required: true
+      GCP_REGION:
+        required: true
+      GCP_PROJECT_ID:
+        required: true
+      # Optional secrets
+      GCP_LOG_LEVEL:
+        required: false
+      DEPLOY_ENV:
+        required: false
 
 jobs:
   deploy:
