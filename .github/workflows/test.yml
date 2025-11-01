@@ -35,3 +35,8 @@ jobs:
       
       - name: Run tests
         run: pytest -v
+
+  deploy:
+    needs: build
+    if: success()
+    uses: ./.github/workflows/deploy-cloudrun.yml
