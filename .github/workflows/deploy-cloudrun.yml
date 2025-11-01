@@ -33,6 +33,13 @@ jobs:
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
+      - name: Ensure required APIs are enabled
+        run: |
+          gcloud services enable \
+            run.googleapis.com \
+            iamcredentials.googleapis.com \
+            artifactregistry.googleapis.com
+
       - name: Configure Docker for Artifact Registry
         run: gcloud --quiet auth configure-docker northamerica-northeast1-docker.pkg.dev
 
