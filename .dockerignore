@@ -1,0 +1,22 @@
+# Prevent 1.6 GB UMLS file from being uploaded
+data/
+*.RRF
+*.zip
+
+# Usual local build junk
+__pycache__/
+.venv/
+venv/
+.env
+*.log
+build/
+dist/
+.eggs/
+*.egg-info/
+
+# IDE & temp
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
