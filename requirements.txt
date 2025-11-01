@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+pybind11
+rapidfuzz
+pandas
+pytest
+python-dotenv
