@@ -3,7 +3,10 @@
 ## Error: Permission 'iam.serviceAccounts.getAccessToken' denied
 
 ### Root Cause
-This error occurs when the GitHub Actions workflow attempts to use Workload Identity Federation (WIF) with a service account that lacks the necessary IAM permissions.
+This error occurs when the GitHub Actions workflow attempts to use Workload Identity Federation (WIF) but the credentials are not properly passed to gcloud commands. The issue manifests when:
+1. The service account lacks the `roles/iam.workloadIdentityUser` role
+2. The Workload Identity binding is not configured correctly for the GitHub repository
+3. Application Default Credentials (ADC) are not properly set in the environment for gcloud commands
 
 ### Prerequisites
 
@@ -25,12 +28,13 @@ export GCP_PROJECT_ID="your-project-id"
 export GCP_SA_EMAIL="your-service-account@your-project.iam.gserviceaccount.com"
 export GITHUB_REPO_OWNER="your-github-username"
 export GITHUB_REPO_NAME="search-MRCONSO-service"
+export PROJECT_NUMBER=$(gcloud projects describe $GCP_PROJECT_ID --format='value(projectNumber)')
 
 # Grant essential IAM roles
 gcloud iam service-accounts add-iam-policy-binding $GCP_SA_EMAIL \
   --project=$GCP_PROJECT_ID \
   --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/$GCP_PROJECT_ID/locations/global/workloadIdentityPools/*/attribute.repository/$GITHUB_REPO_OWNER/$GITHUB_REPO_NAME"
+  --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/attribute.repository/*"
 
 gcloud projects add-iam-policy-binding $GCP_PROJECT_ID \
   --member=serviceAccount:$GCP_SA_EMAIL \
@@ -45,6 +49,8 @@ gcloud projects add-iam-policy-binding $GCP_PROJECT_ID \
   --role=roles/serviceusage.serviceUsageAdmin
 ```
 
+**Note:** The `attribute.repository/*` wildcard is used with the understanding that the Workload Identity Provider's `attributeCondition` restricts tokens to your specific GitHub repository.
+
 ### Verification Steps
 
 #### 1. Check Service Account Roles
@@ -56,12 +62,22 @@ gcloud iam service-accounts get-iam-policy $GCP_SA_EMAIL \
   --project=$GCP_PROJECT_ID
 ```
 
-#### 2. Verify Workload Identity Pool
+Expected output should show:
+- `roles/iam.workloadIdentityUser` binding with principalSet pointing to Workload Identity Pool
+
+#### 2. Verify Workload Identity Provider Configuration
 ```bash
-gcloud iam workload-identity-pools describe "github" \
+gcloud iam workload-identity-pools providers describe github-provider \
+  --location=global \
+  --workload-identity-pool=github-pool \
   --project=$GCP_PROJECT_ID \
-  --location=global
+  --format='yaml'
 ```
+
+Should show:
+- `attributeCondition` restricting to your GitHub repository
+- OIDC issuer URI: `https://token.actions.githubusercontent.com`
+- Attribute mappings including `attribute.repository`
 
 #### 3. Test Service Account Impersonation Locally
 ```bash
@@ -71,7 +87,13 @@ gcloud iam service-accounts keys create /tmp/sa-key.json \
 
 export GOOGLE_APPLICATION_CREDENTIALS="/tmp/sa-key.json"
 
-gcloud services list --enabled --project=$GCP_PROJECT_ID
+# Test that gcloud can use the credentials
+gcloud auth application-default print-access-token > /dev/null && \
+  echo "✅ ADC working" || echo "❌ ADC failed"
+
+# Unset to avoid interference
+unset GOOGLE_APPLICATION_CREDENTIALS
+rm /tmp/sa-key.json
 ```
 
 #### 4. Verify Artifact Registry Access
