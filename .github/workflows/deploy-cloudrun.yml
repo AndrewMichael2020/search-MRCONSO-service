@@ -42,14 +42,22 @@ jobs:
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SA_EMAIL }}
+          token_format: access_token
+          access_token_lifetime: 600s
 
       - name: ☁️ Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: gke-gcloud-auth-plugin
 
-      - name: 🔧 Set GCP Project
+      - name: 🔧 Set GCP Project & Configure Auth
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
           gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
           echo "✅ GCP Project set to: ${{ secrets.GCP_PROJECT_ID }}"
+          gcloud auth application-default set-quota-project ${{ secrets.GCP_PROJECT_ID }}
+          echo "✅ Quota project set"
 
       - name: ✅ Enable required APIs
         run: |
