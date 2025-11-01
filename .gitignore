@@ -90,3 +90,5 @@ cppmatch.*.pyd
 # Temporary files
 /tmp/
 *.log
+
+*.zip

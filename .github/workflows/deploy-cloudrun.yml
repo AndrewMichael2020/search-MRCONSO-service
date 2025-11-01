@@ -1,10 +1,10 @@
-name: deploy-cloudrun
+name: Deploy to Cloud Run
 
 on:
   workflow_dispatch: {}
   push:
     branches: [ main ]
-    paths: 
+    paths:
       - 'Dockerfile'
       - 'app.py'
       - 'cppmatch.cpp'
@@ -16,38 +16,51 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Authenticate to Google Cloud
         id: auth
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           token_format: access_token
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SA_EMAIL }}
-      
+
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
-      
+
       - name: Configure Docker for Artifact Registry
-        run: gcloud --quiet auth configure-docker ${{ secrets.GCP_ARTIFACT_REGION }}-docker.pkg.dev
-      
+        run: gcloud --quiet auth configure-docker northamerica-northeast1-docker.pkg.dev
+
       - name: Build and push Docker image
+        env:
+          IMAGE: ${{ secrets.GCP_ARTIFACT_REPO }}/${{ secrets.SERVICE_NAME }}:${{ github.sha }}-${{ secrets.DEPLOY_ENV }}
         run: |
-          IMAGE=${{ secrets.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/containers/bktree-bench:$(git rev-parse --short HEAD)
-          docker build -t $IMAGE .
-          docker push $IMAGE
-      
+          echo "Building image: $IMAGE"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
       - name: Deploy to Cloud Run
+        env:
+          IMAGE: ${{ secrets.GCP_ARTIFACT_REPO }}/${{ secrets.SERVICE_NAME }}:${{ github.sha }}-${{ secrets.DEPLOY_ENV }}
         run: |
-          gcloud run deploy bktree-bench \
-            --image ${{ secrets.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/containers/bktree-bench:$(git rev-parse --short HEAD) \
-            --region ${{ secrets.GCP_REGION }} \
+          echo "Deploying $IMAGE to Cloud Run..."
+          gcloud run deploy ${{ secrets.SERVICE_NAME }} \
+            --image "$IMAGE" \
+            --region=${{ secrets.GCP_REGION }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
             --platform managed \
             --allow-unauthenticated \
-            --set-env-vars APP_ENV=prod
+            --set-env-vars LOG_LEVEL=${{ secrets.GCP_LOG_LEVEL }},DEPLOY_ENV=${{ secrets.DEPLOY_ENV }}
+
+      - name: Verify Deployment
+        run: |
+          echo "Verifying deployment..."
+          gcloud run services describe ${{ secrets.SERVICE_NAME }} \
+            --region=${{ secrets.GCP_REGION }} \
+            --project=${{ secrets.GCP_PROJECT_ID }} \
+            --format="value(status.url)"
