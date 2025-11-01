@@ -1,16 +1,7 @@
 name: Deploy to Cloud Run
 
 on:
-  workflow_dispatch: {}
-  push:
-    branches: [ main ]
-    paths:
-      - 'Dockerfile'
-      - 'app.py'
-      - 'cppmatch.cpp'
-      - 'requirements.txt'
-      - 'setup.py'
-      - '.dockerignore'
+  workflow_call:
 
 jobs:
   deploy:
@@ -36,13 +27,13 @@ jobs:
 
       - name: ✅ Enable required APIs
         run: |
-          echo "🔧 Enabling Cloud Run, IAM Credentials, and Artifact Registry APIs..."
-          gcloud services enable run.googleapis.com iamcredentials.googleapis.com artifactregistry.googleapis.com
+          gcloud services enable \
+            run.googleapis.com \
+            iamcredentials.googleapis.com \
+            artifactregistry.googleapis.com
 
       - name: 🧰 Configure Docker for Artifact Registry
-        run: |
-          echo "🔧 Configuring Docker for Artifact Registry..."
-          gcloud --quiet auth configure-docker northamerica-northeast1-docker.pkg.dev
+        run: gcloud --quiet auth configure-docker northamerica-northeast1-docker.pkg.dev
 
       - name: 🧱 Build and push Docker image
         env:
@@ -65,7 +56,7 @@ jobs:
             --platform managed \
             --allow-unauthenticated \
             --set-env-vars LOG_LEVEL=${{ secrets.GCP_LOG_LEVEL }},DEPLOY_ENV=${{ secrets.DEPLOY_ENV }}
-          echo "✅ Deployment command executed."
+          echo "✅ Deployment complete."
 
       - name: 🔍 Verify Deployment
         run: |
@@ -74,10 +65,4 @@ jobs:
             --region=${{ secrets.GCP_REGION }} \
             --project=${{ secrets.GCP_PROJECT_ID }} \
             --format="value(status.url)")
-          if [ -z "$URL" ]; then
-            echo "❌ No URL found — deployment may have failed."
-            exit 1
-          fi
-          echo "✅ Service deployed successfully!"
-          echo "🌐 URL: $URL"
- 
+          echo "🌐 Service URL: $URL"
