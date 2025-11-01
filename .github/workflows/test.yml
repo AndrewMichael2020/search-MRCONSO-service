@@ -39,5 +39,8 @@ jobs:
   deploy:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/deploy-cloudrun.yml
     secrets: inherit
