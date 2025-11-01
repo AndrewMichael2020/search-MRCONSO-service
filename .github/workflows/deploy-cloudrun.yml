@@ -1,0 +1,53 @@
+name: deploy-cloudrun
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+    paths: 
+      - 'Dockerfile'
+      - 'app.py'
+      - 'cppmatch.cpp'
+      - 'requirements.txt'
+      - 'setup.py'
+
+jobs:
+  deploy:
+    permissions:
+      id-token: write
+      contents: read
+    
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+      
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+      
+      - name: Configure Docker for Artifact Registry
+        run: gcloud --quiet auth configure-docker ${{ secrets.GCP_ARTIFACT_REGION }}-docker.pkg.dev
+      
+      - name: Build and push Docker image
+        run: |
+          IMAGE=${{ secrets.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/containers/bktree-bench:$(git rev-parse --short HEAD)
+          docker build -t $IMAGE .
+          docker push $IMAGE
+      
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy bktree-bench \
+            --image ${{ secrets.GCP_ARTIFACT_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/containers/bktree-bench:$(git rev-parse --short HEAD) \
+            --region ${{ secrets.GCP_REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars APP_ENV=prod
