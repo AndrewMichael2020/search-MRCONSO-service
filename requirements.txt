@@ -7,3 +7,5 @@ pytest
 python-dotenv
 flask
 gunicorn
+cppmatch
+google-cloud-storage
