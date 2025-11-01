@@ -1,0 +1,27 @@
+# Screenshot: API Usage Example
+
+**Endpoint:** POST /search/bktree
+
+**Request:**
+```bash
+curl -X POST http://localhost:8080/search/bktree \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Neuritis", "maxdist": 1}'
+```
+
+**Response:**
+```json
+{
+    "matches": [
+        {
+            "term": "Neuritis",
+            "distance": 0
+        }
+    ]
+}
+```
+
+**Performance:**
+- Response time: < 10ms
+- Terms indexed: 5,000
+- Search algorithm: BK-tree with Levenshtein distance

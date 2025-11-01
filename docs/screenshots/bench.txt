@@ -1,0 +1,48 @@
+# Screenshot: Benchmark Results
+
+**Command:**
+```bash
+python benchmark.py
+```
+
+**Output:**
+```
+======================================================================
+BK-tree vs Python Fuzzy Search Benchmark
+======================================================================
+
+Loading terms from data/mrconso_sample.txt...
+Loaded 5000 terms (skipped 0 invalid lines)
+
+Building BK-tree index...
+BK-tree built in 0.02 seconds
+
+Running benchmark with 100 random queries (maxdist=1)...
+
+Benchmarking BK-tree...
+  Time: 0.011 seconds
+  QPS:  9443.7
+
+Benchmarking Python baseline...
+  Time: 0.146 seconds
+  QPS:  684.6
+
+======================================================================
+RESULTS
+======================================================================
+Dataset size:          5,000 terms
+BK-tree build time:    0.02 seconds
+Queries:               100
+Max distance:          1
+
+BK-tree time:          0.011 s  (9443.7 QPS)
+Python time:           0.146 s  (684.6 QPS)
+Speedup (Python/BK):   13.79×
+======================================================================
+```
+
+**Key Metrics:**
+- ✅ BK-tree build time: 0.02s (< 30s target)
+- ✅ Speedup ratio: 13.79× (> 10× target)
+- ✅ BK-tree QPS: 9,443.7 queries/second
+- ✅ Python baseline QPS: 684.6 queries/second

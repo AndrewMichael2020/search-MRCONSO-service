@@ -1,0 +1,52 @@
+# Screenshot: Cloud Run Deployment
+
+**Service:** bktree-bench
+
+## Deployment Configuration
+
+**Service Details:**
+- Region: northamerica-northeast1
+- Platform: managed
+- Authentication: Allow unauthenticated
+- Environment: Production
+
+**Container Details:**
+- Image: [region]-docker.pkg.dev/[project]/containers/bktree-bench:latest
+- Port: 8080
+- Build: Multi-stage Dockerfile with C++ compilation
+
+**Environment Variables:**
+- APP_ENV=prod
+- TERMS_PATH=data/mrconso_sample.txt
+
+## Service URL
+```
+https://bktree-bench-[hash]-uc.a.run.app
+```
+
+## Health Status
+✅ Healthy
+- Latest revision deployed successfully
+- All health checks passing
+- CPU allocation: 1 vCPU
+- Memory: 512Mi
+- Concurrency: 80 requests
+
+## Recent Logs
+```
+INFO: Application startup complete
+Loading terms from data/mrconso_sample.txt...
+Loaded 5000 terms (skipped 0 invalid lines)
+Building BK-tree index...
+BK-tree built in 0.02 seconds
+INFO: Uvicorn running on http://0.0.0.0:8080
+```
+
+## Test Request
+```bash
+curl https://bktree-bench-[hash]-uc.a.run.app/healthz
+{"status":"ok","terms":5000}
+```
+
+**Note:** Actual deployment requires GCP project setup and OIDC authentication.
+See `.github/workflows/deploy-cloudrun.yml` for automated deployment.
