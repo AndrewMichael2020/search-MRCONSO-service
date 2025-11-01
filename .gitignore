@@ -92,3 +92,8 @@ data/mrconso_sample.txt
 *.log
 
 *.zip
+
+# Documentation reports (contain deployment-specific values and secrets)
+# Only .gitkeep is tracked to preserve directory structure
+docs/reports/*
+!docs/reports/.gitkeep

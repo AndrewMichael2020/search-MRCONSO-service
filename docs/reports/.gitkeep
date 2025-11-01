@@ -1,0 +1,6 @@
+# This directory contains deployment-specific reports with configuration values
+# It is excluded from version control to prevent exposing secrets
+#
+# Example files (not committed):
+# - DEPLOYMENT_READY.md (contains GitHub secret values)
+# - AUTHENTICATION_FIX_SUMMARY.md (contains service account information)
