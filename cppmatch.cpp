@@ -1,9 +1,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-#include <string>
-#include <vector>
 #include <algorithm>
 #include <memory>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace py = pybind11;
 
@@ -89,6 +91,39 @@ private:
         }
     }
     
+    py::list toSerializableImpl() const {
+        py::list nodes;
+        if (!root) {
+            return nodes;
+        }
+
+        std::vector<std::shared_ptr<BKNode>> queue;
+        queue.push_back(root);
+        std::unordered_map<BKNode*, std::size_t> index;
+        index[root.get()] = 0;
+
+        for (std::size_t i = 0; i < queue.size(); ++i) {
+            const auto& node = queue[i];
+            py::list childList;
+            for (const auto& child : node->children) {
+                const auto& childPtr = child.second;
+                auto it = index.find(childPtr.get());
+                std::size_t childIndex;
+                if (it == index.end()) {
+                    childIndex = queue.size();
+                    queue.push_back(childPtr);
+                    index[childPtr.get()] = childIndex;
+                } else {
+                    childIndex = it->second;
+                }
+                childList.append(py::make_tuple(child.first, childIndex));
+            }
+            nodes.append(py::make_tuple(node->term, childList));
+        }
+
+        return nodes;
+    }
+
 public:
     BKTree() : root(nullptr) {}
     
@@ -109,6 +144,45 @@ public:
         
         return results;
     }
+
+    py::list to_serializable() const {
+        return toSerializableImpl();
+    }
+
+    static BKTree from_serializable(const py::object& data) {
+        BKTree tree;
+        py::sequence seq = py::cast<py::sequence>(data);
+        py::ssize_t length = seq.size();
+        if (length <= 0) {
+            return tree;
+        }
+
+        std::vector<std::shared_ptr<BKNode>> nodes;
+        nodes.reserve(static_cast<std::size_t>(length));
+
+        for (py::ssize_t i = 0; i < length; ++i) {
+            py::tuple entry = py::cast<py::tuple>(seq[i]);
+            std::string term = py::cast<std::string>(entry[0]);
+            nodes.push_back(std::make_shared<BKNode>(term));
+        }
+
+        for (py::ssize_t i = 0; i < length; ++i) {
+            py::tuple entry = py::cast<py::tuple>(seq[i]);
+            py::list childList = py::cast<py::list>(entry[1]);
+            for (const auto& childObj : childList) {
+                py::tuple childTuple = py::cast<py::tuple>(childObj);
+                int distance = py::cast<int>(childTuple[0]);
+                std::size_t childIndex = py::cast<std::size_t>(childTuple[1]);
+                if (childIndex >= nodes.size()) {
+                    throw std::out_of_range("BKTree.from_serializable: child index out of range");
+                }
+                nodes[static_cast<std::size_t>(i)]->children.push_back({distance, nodes[childIndex]});
+            }
+        }
+
+        tree.root = nodes.front();
+        return tree;
+    }
 };
 
 PYBIND11_MODULE(cppmatch, m) {
@@ -124,6 +198,11 @@ PYBIND11_MODULE(cppmatch, m) {
              "Insert a term into the BK-tree",
              py::arg("term"))
         .def("search", &BKTree::search, 
-             "Search for terms within maxDist of query",
-             py::arg("query"), py::arg("maxdist"));
+           "Search for terms within maxDist of query",
+           py::arg("query"), py::arg("maxdist"))
+       .def("to_serializable", &BKTree::to_serializable,
+           "Return a serializable representation of the BK-tree")
+       .def_static("from_serializable", &BKTree::from_serializable,
+           "Reconstruct a BK-tree from a serialized representation",
+           py::arg("data"));
 }
