@@ -113,7 +113,7 @@ jobs:
           set -euo pipefail
           LOG_LEVEL_VALUE="${GCP_LOG_LEVEL:-INFO}"
           DEPLOY_ENV_VALUE="${DEPLOY_ENV:-prod}"
-          MEMORY_VALUE="${CLOUD_RUN_MEMORY:-2Gi}"
+          MEMORY_VALUE="${CLOUD_RUN_MEMORY:-8Gi}"
           CPU_VALUE="${CLOUD_RUN_CPU:-2}"
           TIMEOUT_VALUE="${CLOUD_RUN_TIMEOUT:-600}"
           BASELINE_VALUE="${ENABLE_PYTHON_BASELINE:-false}"
