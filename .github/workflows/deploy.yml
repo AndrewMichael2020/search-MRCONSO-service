@@ -30,6 +30,13 @@ jobs:
       MRCONSO_PATH: ${{ secrets.MRCONSO_PATH }}
       DEPLOY_ENV: ${{ secrets.DEPLOY_ENV }}
       GCP_LOG_LEVEL: ${{ secrets.GCP_LOG_LEVEL }}
+      ENABLE_PYTHON_BASELINE: '${{ vars.ENABLE_PYTHON_BASELINE }}'
+      AUTO_LOAD_ON_STARTUP: '${{ vars.AUTO_LOAD_ON_STARTUP }}'
+      CLOUD_RUN_MEMORY: '${{ vars.CLOUD_RUN_MEMORY }}'
+      CLOUD_RUN_CPU: '${{ vars.CLOUD_RUN_CPU }}'
+      CLOUD_RUN_TIMEOUT: '${{ vars.CLOUD_RUN_TIMEOUT }}'
+      MRCONSO_FORMAT: '${{ vars.MRCONSO_FORMAT }}'
+      SHUTDOWN_AFTER_SECONDS: '${{ vars.SHUTDOWN_AFTER_SECONDS }}'
 
     steps:
       - name: Checkout repository
@@ -106,13 +113,23 @@ jobs:
           set -euo pipefail
           LOG_LEVEL_VALUE="${GCP_LOG_LEVEL:-INFO}"
           DEPLOY_ENV_VALUE="${DEPLOY_ENV:-prod}"
+          MEMORY_VALUE="${CLOUD_RUN_MEMORY:-2Gi}"
+          CPU_VALUE="${CLOUD_RUN_CPU:-2}"
+          TIMEOUT_VALUE="${CLOUD_RUN_TIMEOUT:-600}"
+          BASELINE_VALUE="${ENABLE_PYTHON_BASELINE:-false}"
+          AUTO_LOAD_VALUE="${AUTO_LOAD_ON_STARTUP:-true}"
+          MRCONSO_FORMAT_VALUE="${MRCONSO_FORMAT:-rrf}"
+          SHUTDOWN_VALUE="${SHUTDOWN_AFTER_SECONDS:-1200}"
           gcloud run deploy "$SERVICE_NAME" \
             --image "$IMAGE" \
             --project "$GCP_PROJECT_ID" \
             --region "$GCP_REGION" \
             --platform managed \
+            --memory "$MEMORY_VALUE" \
+            --cpu "$CPU_VALUE" \
+            --timeout "$TIMEOUT_VALUE" \
             --allow-unauthenticated \
-            --set-env-vars "MRCONSO_PATH=$MRCONSO_PATH,LOG_LEVEL=$LOG_LEVEL_VALUE,DEPLOY_ENV=$DEPLOY_ENV_VALUE"
+            --set-env-vars "MRCONSO_PATH=$MRCONSO_PATH,LOG_LEVEL=$LOG_LEVEL_VALUE,DEPLOY_ENV=$DEPLOY_ENV_VALUE,ENABLE_PYTHON_BASELINE=$BASELINE_VALUE,AUTO_LOAD_ON_STARTUP=$AUTO_LOAD_VALUE,MRCONSO_FORMAT=$MRCONSO_FORMAT_VALUE,SHUTDOWN_AFTER_SECONDS=$SHUTDOWN_VALUE"
 
       - name: Show service URL
         run: |

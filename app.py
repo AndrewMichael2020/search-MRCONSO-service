@@ -8,11 +8,13 @@ Endpoints:
     /benchmarks/run
 """
 
+import asyncio
 import logging
 import os
 import random
 import time
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
+from threading import Lock
 from typing import Iterable, Iterator
 
 from fastapi import FastAPI, HTTPException
@@ -25,16 +27,26 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=LOG_LEVEL)
 logger = logging.getLogger("search_mrconso_service")
 
-# Create FastAPI app
-app = FastAPI(title="BKTree vs Python Search", version="0.2.0", redirect_slashes=False)
+def _parse_bool(value: str | None, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
-# Explicitly disable slash-redirects in case upstream FastAPI ignores the constructor flag.
-app.router.redirect_slashes = False
 
-TERMS = []
-TREE = BKTree()
-LOADED = False
 MAX_TERMS = int(os.getenv("MAX_TERMS", "0") or 0) or None
+ENABLE_PYTHON_BASELINE = _parse_bool(os.getenv("ENABLE_PYTHON_BASELINE"), default=True)
+AUTO_LOAD_ON_STARTUP = _parse_bool(os.getenv("AUTO_LOAD_ON_STARTUP"))
+MRCONSO_FORMAT = os.getenv("MRCONSO_FORMAT", "rrf").lower()
+SHUTDOWN_AFTER_SECONDS = int(os.getenv("SHUTDOWN_AFTER_SECONDS", "0") or 0) or None
+
+TERMS: list[str] = []
+TREE = BKTree()
+TERM_COUNT = 0
+LOADED = False
+LOADING = False
+LAST_LOAD_ERROR: str | None = None
+_load_lock = Lock()
+_shutdown_task: asyncio.Task | None = None
 
 
 class SearchReq(BaseModel):
@@ -60,65 +72,169 @@ def _open_mrconso(path: str):
 
 def _iter_terms(lines: Iterable[str]) -> Iterator[str]:
     skipped = 0
-    for line_number, line in enumerate(lines, start=1):
-        parts = line.split("|")
-        if len(parts) > 14:
-            term = parts[14].strip()
+    if MRCONSO_FORMAT == "terms":
+        for line_number, line in enumerate(lines, start=1):
+            term = line.strip()
             if term:
                 yield term
-        else:
-            skipped += 1
-        if line_number % 500_000 == 0:
-            logger.info("Processed %d lines from MRCONSO", line_number)
+            else:
+                skipped += 1
+            if line_number % 500_000 == 0:
+                logger.info("Processed %d terms from cache", line_number)
+    else:
+        for line_number, line in enumerate(lines, start=1):
+            parts = line.split("|")
+            if len(parts) > 14:
+                term = parts[14].strip()
+                if term:
+                    yield term
+            else:
+                skipped += 1
+            if line_number % 500_000 == 0:
+                logger.info("Processed %d lines from MRCONSO", line_number)
     if skipped:
-        logger.info("Skipped %d malformed MRCONSO rows", skipped)
+        logger.info("Skipped %d malformed/empty rows", skipped)
 
 
-def load_terms():
+def load_terms(force: bool = False) -> int:
     """Load MRCONSO terms from local or GCS file and build BK-tree index."""
-    global TERMS, TREE, LOADED
+    global TERMS, TREE, TERM_COUNT, LOADED, LOADING, LAST_LOAD_ERROR
 
-    if LOADED:
+    if LOADED and not force:
         logger.info("MRCONSO already loaded; skipping reload.")
-        return len(TERMS)
+        return TERM_COUNT
+    if LOADING and not force:
+        logger.info("MRCONSO load already in progress; returning current count=%d", TERM_COUNT)
+        return TERM_COUNT
 
-    path = os.getenv("MRCONSO_PATH", "data/umls/2025AA/MRCONSO.RRF")
-    logger.info("Loading MRCONSO from %s ...", path)
+    acquired = _load_lock.acquire(blocking=False)
+    if not acquired:
+        logger.info("Another load operation is holding the lock; returning current count=%d", TERM_COUNT)
+        return TERM_COUNT
 
-    if not path.startswith("gs://") and not os.path.exists(path):
-        msg = f"MRCONSO file not found at {path}"
-        logger.error(msg)
-        raise RuntimeError(msg)
+    LOADING = True
+    LAST_LOAD_ERROR = None
+    try:
+        if LOADED and not force:
+            return TERM_COUNT
 
-    loaded_terms = []
-    start = time.time()
-    limit = MAX_TERMS
-    with _open_mrconso(path) as handle:
-        for idx, term in enumerate(_iter_terms(handle), start=1):
-            loaded_terms.append(term)
-            if limit and idx >= limit:
-                logger.warning("Reached MAX_TERMS=%d; stopping early", limit)
-                break
+        path = os.getenv("MRCONSO_PATH", "data/umls/2025AA/MRCONSO.RRF")
+        logger.info("Loading MRCONSO from %s ...", path)
 
-    logger.info("Loaded %d terms in %.2fs", len(loaded_terms), time.time() - start)
+        if not path.startswith("gs://") and not os.path.exists(path):
+            msg = f"MRCONSO file not found at {path}"
+            logger.error(msg)
+            raise RuntimeError(msg)
 
-    logger.info("Building BK-tree index ...")
-    t0 = time.time()
-    TREE = BKTree()  # Reset tree in case we are reloading after failure.
-    for term in loaded_terms:
-        TREE.insert(term)
-    logger.info("BK-tree built in %.2fs", time.time() - t0)
+        start = time.time()
+        limit = MAX_TERMS
+        new_terms: list[str] | None = [] if ENABLE_PYTHON_BASELINE else None
+        new_tree = BKTree()
+        term_count = 0
 
-    TERMS = loaded_terms
-    LOADED = True
-    return len(TERMS)
+        with _open_mrconso(path) as handle:
+            for idx, term in enumerate(_iter_terms(handle), start=1):
+                new_tree.insert(term)
+                if new_terms is not None:
+                    new_terms.append(term)
+                term_count = idx
+                if limit and idx >= limit:
+                    logger.warning("Reached MAX_TERMS=%d; stopping early", limit)
+                    break
+
+        logger.info("Loaded %d terms in %.2fs", term_count, time.time() - start)
+
+        TREE = new_tree
+        if new_terms is not None:
+            TERMS = new_terms
+        else:
+            TERMS = []
+        TERM_COUNT = term_count
+        LOADED = True
+        return TERM_COUNT
+    except Exception as exc:  # noqa: BLE001
+        LAST_LOAD_ERROR = str(exc)
+        TREE = BKTree()
+        TERMS = []
+        TERM_COUNT = 0
+        LOADED = False
+        logger.exception("Failed to load MRCONSO data")
+        raise
+    finally:
+        LOADING = False
+        _load_lock.release()
+
+
+def _schedule_shutdown_timer() -> None:
+    """Schedule a container shutdown after the configured delay."""
+    global _shutdown_task
+
+    if not SHUTDOWN_AFTER_SECONDS:
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.debug("No running event loop; cannot schedule shutdown timer yet")
+        return
+
+    if _shutdown_task and not _shutdown_task.done():
+        _shutdown_task.cancel()
+
+    async def _shutdown_worker():
+        try:
+            await asyncio.sleep(SHUTDOWN_AFTER_SECONDS)
+            logger.warning("Auto shutdown triggered after %d seconds", SHUTDOWN_AFTER_SECONDS)
+            os._exit(0)
+        except asyncio.CancelledError:
+            logger.info("Auto shutdown timer cancelled")
+
+    _shutdown_task = loop.create_task(_shutdown_worker())
+
+
+@asynccontextmanager
+async def _lifespan_handler(_: FastAPI):
+    global _shutdown_task
+    if AUTO_LOAD_ON_STARTUP:
+        logger.info("AUTO_LOAD_ON_STARTUP=1: starting MRCONSO load in background")
+        asyncio.create_task(_background_load_wrapper())
+
+    try:
+        yield
+    finally:
+        if _shutdown_task and not _shutdown_task.done():
+            _shutdown_task.cancel()
+            with suppress(Exception):
+                await _shutdown_task
+        _shutdown_task = None
+
+
+# Create FastAPI app with lifespan handler
+app = FastAPI(
+    title="BKTree vs Python Search",
+    version="0.2.0",
+    redirect_slashes=False,
+    lifespan=_lifespan_handler,
+)
+
+# Explicitly disable slash-redirects in case upstream FastAPI ignores the constructor flag.
+app.router.redirect_slashes = False
 
 
 @app.get("/healthz")
 @app.get("/healthz/")
 async def health():
     """Check readiness of the app."""
-    return {"status": "ok", "terms": len(TERMS), "loaded": LOADED}
+    return {
+        "status": "ok",
+        "terms": TERM_COUNT,
+        "loaded": LOADED,
+        "loading": LOADING,
+        "baseline_enabled": ENABLE_PYTHON_BASELINE,
+        "shutdown_after_seconds": SHUTDOWN_AFTER_SECONDS,
+        "shutdown_timer_active": _shutdown_task is not None and not _shutdown_task.done(),
+        "last_error": LAST_LOAD_ERROR,
+    }
 
 
 @app.post("/load")
@@ -126,7 +242,8 @@ async def trigger_load():
     """Trigger MRCONSO load manually (to avoid Cloud Run timeout)."""
     try:
         count = load_terms()
-        return {"status": "loaded", "terms": count}
+        _schedule_shutdown_timer()
+        return {"status": "loaded", "terms": count, "baseline_enabled": ENABLE_PYTHON_BASELINE}
     except Exception as e:
         logger.exception("Failed to load MRCONSO data")
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -134,16 +251,18 @@ async def trigger_load():
 
 @app.post("/search/bktree")
 async def search_bktree(req: SearchReq):
-    if not TERMS:
-        raise HTTPException(500, "Terms not loaded")
+    if not LOADED:
+        raise HTTPException(503, "Terms not loaded yet")
     res = TREE.search(req.query, req.maxdist)
     return {"matches": [{"term": t, "distance": d} for t, d in res]}
 
 
 @app.post("/search/python")
 async def search_python(req: SearchReq):
-    if not TERMS:
-        raise HTTPException(500, "Terms not loaded")
+    if not ENABLE_PYTHON_BASELINE:
+        raise HTTPException(503, "Python baseline disabled (ENABLE_PYTHON_BASELINE=0)")
+    if not LOADED or not TERMS:
+        raise HTTPException(503, "Terms not loaded yet")
     best = min(TERMS, key=lambda t: Levenshtein.distance(req.query, t))
     dist = int(Levenshtein.distance(req.query, best))
     return {"matches": [{"term": best, "distance": dist}]}
@@ -151,8 +270,10 @@ async def search_python(req: SearchReq):
 
 @app.post("/benchmarks/run")
 async def run_benchmarks():
-    if not TERMS:
-        raise HTTPException(500, "Terms not loaded")
+    if not LOADED:
+        raise HTTPException(503, "Terms not loaded yet")
+    if not ENABLE_PYTHON_BASELINE:
+        raise HTTPException(503, "Benchmarks unavailable (ENABLE_PYTHON_BASELINE=0)")
     sample = random.sample(TERMS, min(100, len(TERMS)))
 
     t0 = time.time()
@@ -178,3 +299,12 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8080))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
+
+async def _background_load_wrapper():
+    try:
+        await asyncio.to_thread(load_terms)
+        _schedule_shutdown_timer()
+    except Exception:  # noqa: BLE001
+        logger.exception("Background MRCONSO load failed")
+

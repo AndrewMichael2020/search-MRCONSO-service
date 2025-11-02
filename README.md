@@ -130,6 +130,15 @@ Data (MRCONSO-like) → Loader → BK-tree (C++) + Python list
     └── screenshots/            # UI/benchmark screenshots
 ```
 
+## ⚙️ Configuration
+
+- `MRCONSO_PATH` – source MRCONSO (.RRF or cache) file, accepts local paths or `gs://` URIs.
+- `ENABLE_PYTHON_BASELINE` – set to `false` in production to keep only the C++ BK-tree in memory.
+- `AUTO_LOAD_ON_STARTUP` – `true` to kick off background loading when the process boots.
+- `MRCONSO_FORMAT` – `rrf` for raw MRCONSO rows, `terms` for one-term-per-line caches.
+- `MAX_TERMS` – optional cap to down-sample during smoke tests or local development.
+- `SHUTDOWN_AFTER_SECONDS` – optional TTL (e.g. `1200`) that exits the container once the load completes.
+
 ## 🔐 Security & Privacy
 
 - **No PHI or protected health information**

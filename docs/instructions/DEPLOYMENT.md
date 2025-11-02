@@ -158,9 +158,10 @@ gcloud run deploy $SERVICE_NAME \
   --region $REGION \
   --platform managed \
   --allow-unauthenticated \
-  --memory 512Mi \
-  --cpu 1 \
-  --set-env-vars MRCONSO_PATH=gs://YOUR_BUCKET/umls/2025AA/MRCONSO.RRF,LOG_LEVEL=INFO,DEPLOY_ENV=prod
+  --memory 2Gi \
+  --cpu 2 \
+  --timeout 600 \
+  --set-env-vars MRCONSO_PATH=gs://YOUR_BUCKET/umls/2025AA/MRCONSO.RRF,LOG_LEVEL=INFO,DEPLOY_ENV=prod,ENABLE_PYTHON_BASELINE=false,AUTO_LOAD_ON_STARTUP=true,MRCONSO_FORMAT=rrf,SHUTDOWN_AFTER_SECONDS=1200
 ```
 
 ### Get Service URL
@@ -184,6 +185,38 @@ curl -X POST $SERVICE_URL/search/bktree \
   -H "Content-Type: application/json" \
   -d '{"query": "Carditis", "maxdist": 1}'
 ```
+
+### Warm-up Sequence (MRCONSO on Cloud Run)
+
+Because the production MRCONSO file is several gigabytes, the public endpoints stay unusable until the data is loaded and indexed. Warm-up the service only with **POST** requests; browsers issue `GET` calls and Cloud Run replies with `405 Method Not Allowed`.
+
+```bash
+# 1. Trigger the data load (streams from MRCONSO_PATH)
+curl -X POST "${SERVICE_URL}/load"
+
+# 2. Wait until the response reports the term count
+#    If the request fails, tail the logs to see progress/errors
+gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name='${SERVICE_NAME}'" \
+  --project "$PROJECT_ID" \
+  --limit 50 \
+  --format json | jq '.[].textPayload'
+
+# 3. Confirm health once the load finishes
+curl "${SERVICE_URL}/healthz"
+
+# 4. Smoke-test BK-tree search
+curl -X POST "${SERVICE_URL}/search/bktree" \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "Carditis", "maxdist": 1}'
+```
+
+**Memory tips**
+
+- The default Cloud Run revision ships with `--memory 512Mi`. The full MRCONSO dataset can exceed that. Increase the limit (for example `--memory 2Gi`) in the deploy command or set the GitHub Actions workflow to pass a higher value.
+- To validate the pipeline without loading the full dataset, set the `MAX_TERMS` environment variable (e.g. `--set-env-vars MAX_TERMS=500000`). The loader stops after the specified number of rows and continues to build the BK-tree with that subset.
+- When `ENABLE_PYTHON_BASELINE=false`, the `/search/python` and `/benchmarks/run` endpoints intentionally return `503` to avoid keeping a duplicate Python list in memory.
+- To reduce load latency, preprocess the MRCONSO terms into a newline cache (see `scripts/make_sample_from_mrconso.py --format terms`) and set `MRCONSO_FORMAT=terms`.
+- Use `SHUTDOWN_AFTER_SECONDS` (e.g. `1200`) to enforce a time-to-live; the container exits after the delay so Cloud Run tears down the in-memory index when idle.
 
 ### Configure Authentication (Optional)
 
@@ -304,6 +337,11 @@ gh run list --workflow=deploy-cloudrun.yml
 | `LOG_LEVEL` | `INFO` | Application log verbosity |
 | `DEPLOY_ENV` | `dev` | Tag to distinguish environments |
 | `PORT` | `8080` | Server port |
+| `ENABLE_PYTHON_BASELINE` | `true` | Keep a Python list copy of terms (disable for lower memory) |
+| `AUTO_LOAD_ON_STARTUP` | `false` | Launch background MRCONSO load during startup |
+| `MRCONSO_FORMAT` | `rrf` | `rrf` for raw rows, `terms` for newline-separated caches |
+| `MAX_TERMS` | unset | Optional limit for smoke tests or partial loads |
+| `SHUTDOWN_AFTER_SECONDS` | unset | Optional TTL in seconds (e.g. `1200`) to exit the container after loading |
 
 ### Setting in Cloud Run
 

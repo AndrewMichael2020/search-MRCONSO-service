@@ -79,8 +79,15 @@ def extract_from_mrconso(mrconso_path, n=50000):
     return terms
 
 
-def write_mrconso_sample(terms, output_path):
-    """Write terms in MRCONSO.RRF format (pipe-delimited with 15+ fields)."""
+def write_terms(terms, output_path, fmt="rrf"):
+    """Write terms in MRCONSO.RRF or newline-separated format."""
+    fmt = fmt.lower()
+    if fmt == "terms":
+        with open(output_path, 'w', encoding='utf-8') as f:
+            for term in terms:
+                f.write(term + '\n')
+        return
+
     with open(output_path, 'w', encoding='utf-8') as f:
         for i, term in enumerate(terms):
             # Create a fake MRCONSO row with the term at index 14
@@ -103,7 +110,7 @@ def write_mrconso_sample(terms, output_path):
             srl = "0"
             suppress = "N"
             cvf = ""
-            
+
             row = f"{cui}|{lat}|{ts}|{lui}|{stt}|{sui}|{ispref}|{aui}|{saui}|{scui}|{sdui}|{sab}|{tty}|{code}|{str_term}|{srl}|{suppress}|{cvf}"
             f.write(row + '\n')
 
@@ -127,6 +134,12 @@ def main():
         default=50000,
         help='Number of terms to generate/extract (default: 50000)'
     )
+    parser.add_argument(
+        '--format',
+        choices=['rrf', 'terms'],
+        default='rrf',
+        help="Output format: 'rrf' for MRCONSO rows, 'terms' for one term per line"
+    )
     
     args = parser.parse_args()
     
@@ -137,8 +150,8 @@ def main():
         print(f"Generating {args.n} synthetic medical terms...")
         terms = generate_synthetic_terms(args.n)
     
-    print(f"Writing {len(terms)} terms to {args.out}...")
-    write_mrconso_sample(terms, args.out)
+    print(f"Writing {len(terms)} terms to {args.out} (format={args.format})...")
+    write_terms(terms, args.out, fmt=args.format)
     print("Done!")
 
 
