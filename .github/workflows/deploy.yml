@@ -1,0 +1,110 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: cloud-run-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  deploy:
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ secrets.GCP_REGION }}
+      SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
+      GCP_ARTIFACT_REPO: ${{ secrets.GCP_ARTIFACT_REPO }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+      MRCONSO_PATH: ${{ secrets.MRCONSO_PATH }}
+      DEPLOY_ENV: ${{ secrets.DEPLOY_ENV }}
+      GCP_LOG_LEVEL: ${{ secrets.GCP_LOG_LEVEL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate workflow configuration
+        run: |
+          set -euo pipefail
+          : "${GCP_PROJECT_ID:?Set the GCP_PROJECT_ID secret}" 
+          : "${GCP_REGION:?Set the GCP_REGION secret}" 
+          : "${SERVICE_NAME:?Set the SERVICE_NAME secret}" 
+          : "${GCP_ARTIFACT_REPO:?Set the GCP_ARTIFACT_REPO secret (full Artifact Registry path)}" 
+          : "${GCP_WORKLOAD_IDENTITY_PROVIDER:?Set the GCP_WORKLOAD_IDENTITY_PROVIDER secret}" 
+          : "${GCP_SA_EMAIL:?Set the GCP_SA_EMAIL secret}" 
+          : "${MRCONSO_PATH:?Set the MRCONSO_PATH secret (gs:// bucket path to MRCONSO.RRF)}"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SA_EMAIL }}
+          token_format: access_token
+          access_token_lifetime: 900s
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure gcloud defaults
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
+        run: |
+          set -euo pipefail
+          gcloud config set project "$GCP_PROJECT_ID"
+          gcloud config set run/region "$GCP_REGION"
+          gcloud auth application-default set-quota-project "$GCP_PROJECT_ID"
+          gcloud auth list
+
+      - name: Configure Docker authentication
+        run: |
+          set -euo pipefail
+          REGISTRY_HOST="${GCP_ARTIFACT_REPO%%/*}"
+          gcloud --quiet auth configure-docker "$REGISTRY_HOST"
+
+      - name: Build and push image
+        env:
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          IMAGE="$GCP_ARTIFACT_REPO/$SERVICE_NAME:$IMAGE_TAG"
+          echo "Building $IMAGE"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+        id: build
+
+      - name: Deploy to Cloud Run
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          LOG_LEVEL_VALUE="${GCP_LOG_LEVEL:-INFO}"
+          DEPLOY_ENV_VALUE="${DEPLOY_ENV:-prod}"
+          gcloud run deploy "$SERVICE_NAME" \
+            --image "$IMAGE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars "MRCONSO_PATH=$MRCONSO_PATH,LOG_LEVEL=$LOG_LEVEL_VALUE,DEPLOY_ENV=$DEPLOY_ENV_VALUE"
+
+      - name: Show service URL
+        run: |
+          set -euo pipefail
+          gcloud run services describe "$SERVICE_NAME" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --format='value(status.url)'

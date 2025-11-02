@@ -21,103 +21,106 @@ This guide covers deploying the BK-tree search application to various environmen
 - Python 3.11+
 - GCC/G++ (for C++ compilation)
 - pip
+## GitHub Actions CI/CD
 
-### Setup
+Two workflows live under `.github/workflows/`:
 
-```bash
-# Clone repository
-git clone https://github.com/AndrewMichael2020/search-MRCONSO-service.git
-cd search-MRCONSO-service
+- `tests.yml` — runs on every push and pull request. Compiles the C++ extension, generates a small MRCONSO sample, and executes pytest.
+- `deploy.yml` — runs when code is pushed to `main` (or manually via *Run workflow*). It reuses `tests.yml`, authenticates to GCP with Workload Identity Federation (WIF), builds the container image, pushes to Artifact Registry, and deploys to Cloud Run with the correct environment variables.
 
-# Install system dependencies (Ubuntu/Debian)
-sudo apt-get update
-sudo apt-get install -y build-essential python3-dev
+### Required repository secrets
 
-# Install Python dependencies
-pip install -r requirements.txt
+Configure the following secrets in **Settings → Secrets and variables → Actions**:
 
-# Build C++ extension
-python setup.py build_ext --inplace
+| Secret | Example | Purpose |
+|--------|---------|---------|
+| `GCP_PROJECT_ID` | `<your-project-id>` | Target GCP project |
+| `GCP_REGION` | `<your-region>` | Cloud Run region |
+| `SERVICE_NAME` | `<your-service-name>` | Cloud Run service name |
+| `GCP_ARTIFACT_REPO` | `<region>-docker.pkg.dev/<project-id>/<repo-name>` | Fully-qualified Artifact Registry repository |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/<project-number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>` | WIF provider resource |
+| `GCP_SA_EMAIL` | `<service-account>@<project-id>.iam.gserviceaccount.com` | Service account used by GitHub Actions |
+| `MRCONSO_PATH` | `gs://<bucket>/umls/2025AA/MRCONSO.RRF` | Location of the MRCONSO data in GCS |
+| `DEPLOY_ENV` (optional) | `prod` | Propagated to the service as metadata |
+| `GCP_LOG_LEVEL` (optional) | `INFO` | Controls FastAPI logging |
 
-# Generate sample data
-python scripts/make_sample_from_mrconso.py --out data/mrconso_sample.txt --n 5000
+### Workload Identity Federation bindings
 
-# Run tests
-pytest -v
-
-# Start server
-uvicorn app:app --reload
-```
-
-### Verify Installation
+Use Workload Identity Federation so GitHub can impersonate the deployment service account without JSON keys. If you need to recreate the bindings:
 
 ```bash
-# Check C++ module
-python -c "import cppmatch; print('cppmatch OK')"
+export PROJECT_ID="<your-project-id>"
+export PROJECT_NUMBER="<your-project-number>"
+export SERVICE_ACCOUNT_NAME="<service-account-name>"
+export SERVICE_ACCOUNT="${SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+export WIP_POOL="<workload-identity-pool-id>"
+export WIP_PROVIDER="<workload-identity-provider-id>"
+export REPOSITORY="<github-owner>/<repo-name>"
 
-# Run benchmark
-python benchmark.py
+# Ensure the Workload Identity pool/provider exist (idempotent)
 
-# Test API
-curl http://localhost:8000/healthz
-```
-
----
-
-## Docker Deployment
-
-### Build Container
-
-```bash
-# Generate sample data first
-python scripts/make_sample_from_mrconso.py --out data/mrconso_sample.txt --n 50000
-
-# Build image
-docker build -t bktree-bench:latest .
-
-# Run container
-docker run -p 8080:8080 bktree-bench:latest
-```
-
-### Test Container
-
-```bash
-# Health check
-curl http://localhost:8080/healthz
-
-# Search test
-curl -X POST http://localhost:8080/search/bktree \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Neuritis", "maxdist": 1}'
-
-# Benchmark
-curl -X POST http://localhost:8080/benchmarks/run
-```
-
-### Multi-stage Build Details
-
-The Dockerfile uses a multi-stage build:
-
-**Build Stage:**
-- Compiles C++ extension
-- Installs build tools
-- ~1.5 GB
-
-**Runtime Stage:**
-- Minimal runtime dependencies
-- Copies compiled artifacts
-- ~400 MB final image
-
----
-
-## Google Cloud Run
+  --project="$PROJECT_ID" \
+  --location=global \
+  --display-name="GitHub Actions Pool" \
+  --quiet || true
 
 ### Prerequisites
+  --project="$PROJECT_ID" \
+  --location=global \
+  --workload-identity-pool="$WIP_POOL" \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.actor=assertion.actor" \
+  --attribute-condition="assertion.repository=='${REPOSITORY}'" \
+  --quiet || true
 
+# Bind the GitHub repository principal to the service account
+
+  --project="$PROJECT_ID" \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIP_POOL}/attribute.repository/${REPOSITORY}" \
+  --role="roles/iam.workloadIdentityUser"
+
+gcloud iam service-accounts add-iam-policy-binding "$SERVICE_ACCOUNT" \
+  --project="$PROJECT_ID" \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIP_POOL}/attribute.repository/${REPOSITORY}" \
+  --role="roles/iam.serviceAccountUser"
+
+gcloud iam service-accounts add-iam-policy-binding "$SERVICE_ACCOUNT" \
+  --project="$PROJECT_ID" \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIP_POOL}/attribute.repository/${REPOSITORY}" \
+  --role="roles/iam.serviceAccountTokenCreator"
+
+# Allow the service account to admin its own keys/tokens (optional but helpful)
 - GCP Project with billing enabled
-- gcloud CLI installed and configured
-- Artifact Registry repository created
+  --project="$PROJECT_ID" \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/iam.serviceAccountTokenCreator"
 
+gcloud iam service-accounts add-iam-policy-binding "$SERVICE_ACCOUNT" \
+  --project="$PROJECT_ID" \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/iam.serviceAccountKeyAdmin"
+
+# Grant project-level roles once (existing roles are preserved)
+- gcloud CLI installed and configured
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/run.admin"
+
+- Artifact Registry repository created
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/artifactregistry.writer"
+
+
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
+  --role="roles/serviceusage.serviceUsageAdmin"
+```
+
+### Deployment flow
+
+1. Open a pull request → `tests.yml` compiles the extension and runs pytest.
+2. Merge to `main` → `deploy.yml` re-runs tests, authenticates with WIF, builds the container, and deploys it to Cloud Run.
+3. The deployed service receives `MRCONSO_PATH` (pointing at the existing GCS object), `LOG_LEVEL`, and `DEPLOY_ENV` env vars automatically.
+
+To deploy manually, navigate to **Actions → Deploy to Cloud Run → Run workflow**. Monitor progress in the workflow logs or with `gh run watch --exit-status`.
 ### One-Time Setup
 
 ```bash
@@ -157,7 +160,7 @@ gcloud run deploy $SERVICE_NAME \
   --allow-unauthenticated \
   --memory 512Mi \
   --cpu 1 \
-  --set-env-vars TERMS_PATH=data/mrconso_sample.txt,APP_ENV=prod
+  --set-env-vars MRCONSO_PATH=gs://YOUR_BUCKET/umls/2025AA/MRCONSO.RRF,LOG_LEVEL=INFO,DEPLOY_ENV=prod
 ```
 
 ### Get Service URL
@@ -208,40 +211,40 @@ This allows GitHub Actions to authenticate to GCP without service account keys.
 
 ```bash
 # Create Workload Identity Pool
-gcloud iam workload-identity-pools create github-pool \
+gcloud iam workload-identity-pools create "$WIP_POOL" \
   --location=global \
   --display-name="GitHub Actions Pool"
 
 # Create Provider
-gcloud iam workload-identity-pools providers create-oidc github-provider \
-  --workload-identity-pool=github-pool \
+gcloud iam workload-identity-pools providers create-oidc "$WIP_PROVIDER" \
+  --workload-identity-pool="$WIP_POOL" \
   --location=global \
   --issuer-uri="https://token.actions.githubusercontent.com" \
   --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
-  --attribute-condition="assertion.repository=='AndrewMichael2020/search-MRCONSO-service'"
+  --attribute-condition="assertion.repository=='${REPOSITORY}'"
 
 # Create Service Account
-gcloud iam service-accounts create github-actions-sa \
+gcloud iam service-accounts create "$SERVICE_ACCOUNT_NAME" \
   --display-name="GitHub Actions Service Account"
 
 # Grant permissions
 gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:github-actions-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
   --role="roles/run.admin"
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:github-actions-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
   --role="roles/artifactregistry.writer"
 
 gcloud projects add-iam-policy-binding $PROJECT_ID \
-  --member="serviceAccount:github-actions-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+  --member="serviceAccount:${SERVICE_ACCOUNT}" \
   --role="roles/iam.serviceAccountUser"
 
 # Bind Workload Identity
 gcloud iam service-accounts add-iam-policy-binding \
-  github-actions-sa@$PROJECT_ID.iam.gserviceaccount.com \
+  "$SERVICE_ACCOUNT" \
   --role="roles/iam.workloadIdentityUser" \
-  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-pool/attribute.repository/AndrewMichael2020/search-MRCONSO-service"
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIP_POOL}/attribute.repository/${REPOSITORY}"
 ```
 
 **Note:** Replace `PROJECT_NUMBER` with your actual GCP project number, which you can get with:
@@ -254,9 +257,9 @@ gcloud projects describe $PROJECT_ID --format='value(projectNumber)'
 ```bash
 # Only needed if using token_format: access_token
 gcloud iam service-accounts add-iam-policy-binding \
-  github-actions-sa@$PROJECT_ID.iam.gserviceaccount.com \
+  "$SERVICE_ACCOUNT" \
   --role="roles/iam.serviceAccountTokenCreator" \
-  --member="serviceAccount:github-actions-sa@$PROJECT_ID.iam.gserviceaccount.com"
+  --member="serviceAccount:${SERVICE_ACCOUNT}"
 ```
 
 ### Configure GitHub Secrets
@@ -266,7 +269,7 @@ Add these secrets to your GitHub repository (Settings → Secrets and variables 
 - `GCP_PROJECT`: Your GCP project ID
 - `GCP_REGION`: Deployment region (e.g., `northamerica-northeast1`)
 - `GCP_ARTIFACT_REGION`: Artifact Registry region
-- `GCP_SA_EMAIL`: Service account email (`github-actions-sa@PROJECT_ID.iam.gserviceaccount.com`)
+- `GCP_SA_EMAIL`: Service account email (`<service-account-name>@PROJECT_ID.iam.gserviceaccount.com`)
 - `GCP_WORKLOAD_IDENTITY_PROVIDER`: Full provider resource name
 
 ### Trigger Deployment
@@ -297,8 +300,9 @@ gh run list --workflow=deploy-cloudrun.yml
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TERMS_PATH` | `data/mrconso_sample.txt` | Path to terms file |
-| `APP_ENV` | `dev` | Environment (dev/staging/prod) |
+| `MRCONSO_PATH` | `data/umls/2025AA/META/MRCONSO.RRF` | Path or `gs://` URI for MRCONSO data |
+| `LOG_LEVEL` | `INFO` | Application log verbosity |
+| `DEPLOY_ENV` | `dev` | Tag to distinguish environments |
 | `PORT` | `8080` | Server port |
 
 ### Setting in Cloud Run
@@ -306,7 +310,7 @@ gh run list --workflow=deploy-cloudrun.yml
 ```bash
 gcloud run services update $SERVICE_NAME \
   --region $REGION \
-  --set-env-vars TERMS_PATH=data/custom_terms.txt,APP_ENV=prod
+  --set-env-vars MRCONSO_PATH=gs://YOUR_BUCKET/umls/2025AA/MRCONSO.RRF,LOG_LEVEL=INFO,DEPLOY_ENV=prod
 ```
 
 ---
