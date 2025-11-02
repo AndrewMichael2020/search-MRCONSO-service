@@ -63,13 +63,15 @@ jobs:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
           set -euo pipefail
+          export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$GOOGLE_APPLICATION_CREDENTIALS"
+          gcloud auth login --cred-file="$GOOGLE_APPLICATION_CREDENTIALS" --brief
           gcloud config set project "$GCP_PROJECT_ID"
           gcloud config set run/region "$GCP_REGION"
-          gcloud auth application-default set-quota-project "$GCP_PROJECT_ID" \
-            --credential-file-override "$GOOGLE_APPLICATION_CREDENTIALS"
           gcloud auth list
 
       - name: Enable required APIs
+        env:
+          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ${{ steps.auth.outputs.credentials_file_path }}
         run: |
           set -euo pipefail
           gcloud services enable \
