@@ -1,10 +1,13 @@
-import importlib
-import sys
 import asyncio
+import importlib
+import json
+import sys
+import tarfile
 from typing import Dict
 
 import pytest
 from fastapi.testclient import TestClient
+from cppmatch import BKTree
 
 
 def _reload_app(monkeypatch: pytest.MonkeyPatch, env: Dict[str, str | None]):
@@ -47,6 +50,65 @@ def _write_rrf(path, terms):
         ]
         rows.append("|".join(row))
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def _make_bktree_artifact(tmp_dir, terms):
+    tree = BKTree()
+    for term in terms:
+        tree.insert(term)
+
+    bin_path = tmp_dir / "bktree.bin"
+    tree.save(str(bin_path))
+
+    metadata = {
+        "schema_version": 1,
+        "term_count": len(terms),
+        "created_at": "2025-01-01T00:00:00+00:00",
+    }
+    metadata_path = tmp_dir / "metadata.json"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    tar_path = tmp_dir / "artifact.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tar:
+        tar.add(bin_path, arcname="bktree.bin")
+        tar.add(metadata_path, arcname="metadata.json")
+
+    return tar_path, metadata
+
+
+def test_load_terms_from_artifact(monkeypatch, tmp_path):
+    artifact_path, metadata = _make_bktree_artifact(tmp_path, ["Alpha", "Bravo", "Charlie"])
+
+    app_module = _reload_app(
+        monkeypatch,
+        {
+            "BKTREE_ARTIFACT_PATH": str(artifact_path),
+            "MRCONSO_PATH": str(tmp_path / "unused.txt"),
+            "ENABLE_PYTHON_BASELINE": "1",
+            "AUTO_LOAD_ON_STARTUP": "0",
+            "SHUTDOWN_AFTER_SECONDS": "0",
+        },
+    )
+
+    count = app_module.load_terms(force=True)
+    assert count == metadata["term_count"] == 3
+    assert app_module.TERM_COUNT == 3
+    assert app_module.ARTIFACT_METADATA == metadata
+    assert app_module.TERMS == []
+
+    with TestClient(app_module.app) as client:
+        health = client.get("/healthz")
+        payload = health.json()
+        assert payload["artifact_loaded"] is True
+        assert payload["artifact_term_count"] == 3
+
+        bktree = client.post("/search/bktree", json={"query": "Alpha", "maxdist": 1})
+        assert bktree.status_code == 200
+        matches = {item["term"] for item in bktree.json()["matches"]}
+        assert "Alpha" in matches
+
+        python_baseline = client.post("/search/python", json={"query": "Alpha", "maxdist": 1})
+        assert python_baseline.status_code == 503
 
 
 def test_load_terms_without_baseline(monkeypatch, tmp_path):

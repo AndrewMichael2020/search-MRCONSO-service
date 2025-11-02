@@ -1,21 +1,17 @@
-"""
-FastAPI app for BK-tree vs Python fuzzy search on MRCONSO terms.
-Endpoints:
-    /healthz
-    /load              -> trigger MRCONSO load (manual or from startup task)
-    /search/bktree
-    /search/python
-    /benchmarks/run
-"""
+"""FastAPI service for BK-tree search on MRCONSO terms."""
 
 import asyncio
+import json
 import logging
 import os
 import random
+import tarfile
+import tempfile
 import time
 from contextlib import asynccontextmanager, contextmanager, suppress
+from pathlib import Path
 from threading import Lock
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -38,6 +34,7 @@ ENABLE_PYTHON_BASELINE = _parse_bool(os.getenv("ENABLE_PYTHON_BASELINE"), defaul
 AUTO_LOAD_ON_STARTUP = _parse_bool(os.getenv("AUTO_LOAD_ON_STARTUP"))
 MRCONSO_FORMAT = os.getenv("MRCONSO_FORMAT", "rrf").lower()
 SHUTDOWN_AFTER_SECONDS = int(os.getenv("SHUTDOWN_AFTER_SECONDS", "0") or 0) or None
+BKTREE_ARTIFACT_PATH = os.getenv("BKTREE_ARTIFACT_PATH")
 
 TERMS: list[str] = []
 TREE = BKTree()
@@ -45,6 +42,7 @@ TERM_COUNT = 0
 LOADED = False
 LOADING = False
 LAST_LOAD_ERROR: str | None = None
+ARTIFACT_METADATA: dict[str, Any] | None = None
 _load_lock = Lock()
 _shutdown_task: asyncio.Task | None = None
 
@@ -68,6 +66,54 @@ def _open_mrconso(path: str):
     else:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             yield fh
+
+
+def _ensure_local_artifact(path: str) -> tuple[Path, bool]:
+    """Ensure the BK-tree artifact exists locally; download from GCS if required."""
+
+    if not path.startswith("gs://"):
+        return Path(path), False
+
+    from google.cloud import storage  # Lazy import to keep local runs lightweight.
+
+    client = storage.Client()
+    bucket_name, blob_name = path.replace("gs://", "", 1).split("/", 1)
+    blob = client.bucket(bucket_name).blob(blob_name)
+
+    tmp_dir = Path(tempfile.gettempdir())
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(prefix="bktree_artifact_", suffix=".tar.gz", delete=False)
+    handle.close()
+    tmp_path = Path(handle.name)
+
+    logger.info("Downloading BK-tree artifact from gs://%s/%s to %s", bucket_name, blob_name, tmp_path)
+    blob.download_to_filename(handle.name)
+    return tmp_path, True
+
+
+def _load_bktree_artifact(path: str) -> tuple[BKTree, dict[str, Any]]:
+    """Load a serialized BK-tree from a tar.gz artifact and return (tree, metadata)."""
+
+    local_path, should_cleanup = _ensure_local_artifact(path)
+    metadata: dict[str, Any]
+    try:
+        with tarfile.open(local_path, "r:gz") as tar, tempfile.TemporaryDirectory(prefix="bktree_extract_") as tmp_dir:
+            tmp_base = Path(tmp_dir)
+            tar.extractall(tmp_base)
+
+            metadata_path = tmp_base / "metadata.json"
+            tree_path = tmp_base / "bktree.bin"
+
+            if not metadata_path.exists() or not tree_path.exists():
+                raise RuntimeError("BK-tree artifact missing required files")
+
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            tree = BKTree.load(str(tree_path))
+            return tree, metadata
+    finally:
+        if should_cleanup:
+            with suppress(Exception):
+                local_path.unlink()
 
 
 def _iter_terms(lines: Iterable[str]) -> Iterator[str]:
@@ -98,7 +144,7 @@ def _iter_terms(lines: Iterable[str]) -> Iterator[str]:
 
 def load_terms(force: bool = False) -> int:
     """Load MRCONSO terms from local or GCS file and build BK-tree index."""
-    global TERMS, TREE, TERM_COUNT, LOADED, LOADING, LAST_LOAD_ERROR
+    global TERMS, TREE, TERM_COUNT, LOADED, LOADING, LAST_LOAD_ERROR, ARTIFACT_METADATA
 
     if LOADED and not force:
         logger.info("MRCONSO already loaded; skipping reload.")
@@ -118,38 +164,60 @@ def load_terms(force: bool = False) -> int:
         if LOADED and not force:
             return TERM_COUNT
 
-        path = os.getenv("MRCONSO_PATH", "data/umls/2025AA/MRCONSO.RRF")
-        logger.info("Loading MRCONSO from %s ...", path)
-
-        if not path.startswith("gs://") and not os.path.exists(path):
-            msg = f"MRCONSO file not found at {path}"
-            logger.error(msg)
-            raise RuntimeError(msg)
-
-        start = time.time()
-        limit = MAX_TERMS
-        new_terms: list[str] | None = [] if ENABLE_PYTHON_BASELINE else None
-        new_tree = BKTree()
+        artifact_path = BKTREE_ARTIFACT_PATH
+        new_tree: BKTree | None = None
+        metadata: dict[str, Any] | None = None
         term_count = 0
+        new_terms: list[str] | None = None
 
-        with _open_mrconso(path) as handle:
-            for idx, term in enumerate(_iter_terms(handle), start=1):
-                new_tree.insert(term)
-                if new_terms is not None:
-                    new_terms.append(term)
-                term_count = idx
-                if limit and idx >= limit:
-                    logger.warning("Reached MAX_TERMS=%d; stopping early", limit)
-                    break
+        if artifact_path:
+            try:
+                logger.info("Attempting to load BK-tree artifact from %s", artifact_path)
+                new_tree, metadata = _load_bktree_artifact(artifact_path)
+                term_count = int(metadata.get("term_count", 0) or 0)
+                if term_count <= 0:
+                    logger.warning("Artifact metadata missing term_count; term count will be reported as 0")
+                if ENABLE_PYTHON_BASELINE:
+                    logger.warning("Python baseline unavailable when using BK-tree artifact; /search/python will return 503")
+                new_terms = []
+                logger.info("Loaded BK-tree artifact successfully (terms=%s)", term_count or "unknown")
+            except Exception:
+                logger.exception("Failed to load BK-tree artifact; falling back to raw MRCONSO")
+                new_tree = None
+                metadata = None
+                term_count = 0
 
-        logger.info("Loaded %d terms in %.2fs", term_count, time.time() - start)
+        if new_tree is None:
+            path = os.getenv("MRCONSO_PATH", "data/umls/2025AA/MRCONSO.RRF")
+            logger.info("Loading MRCONSO from %s ...", path)
+
+            if not path.startswith("gs://") and not os.path.exists(path):
+                msg = f"MRCONSO file not found at {path}"
+                logger.error(msg)
+                raise RuntimeError(msg)
+
+            start = time.time()
+            limit = MAX_TERMS
+            new_terms = [] if ENABLE_PYTHON_BASELINE else None
+            new_tree = BKTree()
+
+            with _open_mrconso(path) as handle:
+                for idx, term in enumerate(_iter_terms(handle), start=1):
+                    new_tree.insert(term)
+                    if new_terms is not None:
+                        new_terms.append(term)
+                    term_count = idx
+                    if limit and idx >= limit:
+                        logger.warning("Reached MAX_TERMS=%d; stopping early", limit)
+                        break
+
+            logger.info("Loaded %d terms in %.2fs", term_count, time.time() - start)
+            metadata = None
 
         TREE = new_tree
-        if new_terms is not None:
-            TERMS = new_terms
-        else:
-            TERMS = []
+        TERMS = new_terms or []
         TERM_COUNT = term_count
+        ARTIFACT_METADATA = metadata
         LOADED = True
         return TERM_COUNT
     except Exception as exc:  # noqa: BLE001
@@ -158,6 +226,7 @@ def load_terms(force: bool = False) -> int:
         TERMS = []
         TERM_COUNT = 0
         LOADED = False
+        ARTIFACT_METADATA = None
         logger.exception("Failed to load MRCONSO data")
         raise
     finally:
@@ -234,6 +303,9 @@ async def health():
         "shutdown_after_seconds": SHUTDOWN_AFTER_SECONDS,
         "shutdown_timer_active": _shutdown_task is not None and not _shutdown_task.done(),
         "last_error": LAST_LOAD_ERROR,
+        "artifact_loaded": ARTIFACT_METADATA is not None,
+        "artifact_path": BKTREE_ARTIFACT_PATH,
+        "artifact_term_count": ARTIFACT_METADATA.get("term_count") if ARTIFACT_METADATA else None,
     }
 
 

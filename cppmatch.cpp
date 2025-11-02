@@ -1,6 +1,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -91,34 +94,29 @@ private:
         }
     }
     
-    py::list toSerializableImpl() const {
-        py::list nodes;
+    std::vector<std::shared_ptr<BKNode>> collectNodes(std::unordered_map<BKNode*, std::uint32_t>& index) const {
+        std::vector<std::shared_ptr<BKNode>> nodes;
         if (!root) {
             return nodes;
         }
 
-        std::vector<std::shared_ptr<BKNode>> queue;
-        queue.push_back(root);
-        std::unordered_map<BKNode*, std::size_t> index;
+        nodes.push_back(root);
         index[root.get()] = 0;
 
-        for (std::size_t i = 0; i < queue.size(); ++i) {
-            const auto& node = queue[i];
-            py::list childList;
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            const auto& node = nodes[i];
             for (const auto& child : node->children) {
                 const auto& childPtr = child.second;
-                auto it = index.find(childPtr.get());
-                std::size_t childIndex;
-                if (it == index.end()) {
-                    childIndex = queue.size();
-                    queue.push_back(childPtr);
-                    index[childPtr.get()] = childIndex;
-                } else {
-                    childIndex = it->second;
+                if (!childPtr) {
+                    continue;
                 }
-                childList.append(py::make_tuple(child.first, childIndex));
+                auto found = index.find(childPtr.get());
+                if (found == index.end()) {
+                    std::uint32_t childIndex = static_cast<std::uint32_t>(nodes.size());
+                    index[childPtr.get()] = childIndex;
+                    nodes.push_back(childPtr);
+                }
             }
-            nodes.append(py::make_tuple(node->term, childList));
         }
 
         return nodes;
@@ -146,13 +144,30 @@ public:
     }
 
     py::list to_serializable() const {
-        return toSerializableImpl();
+        py::list serialized;
+        std::unordered_map<BKNode*, std::uint32_t> index;
+        auto nodes = collectNodes(index);
+
+        for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(nodes.size()); ++i) {
+            const auto& node = nodes[i];
+            py::list childList;
+            for (const auto& child : node->children) {
+                auto it = index.find(child.second.get());
+                if (it == index.end()) {
+                    throw std::runtime_error("BKTree.to_serializable: missing child index");
+                }
+                childList.append(py::make_tuple(child.first, it->second));
+            }
+            serialized.append(py::make_tuple(node->term, childList));
+        }
+
+        return serialized;
     }
 
     static BKTree from_serializable(const py::object& data) {
-        BKTree tree;
         py::sequence seq = py::cast<py::sequence>(data);
         py::ssize_t length = seq.size();
+        BKTree tree;
         if (length <= 0) {
             return tree;
         }
@@ -169,6 +184,9 @@ public:
         for (py::ssize_t i = 0; i < length; ++i) {
             py::tuple entry = py::cast<py::tuple>(seq[i]);
             py::list childList = py::cast<py::list>(entry[1]);
+            auto& nodeChildren = nodes[static_cast<std::size_t>(i)]->children;
+            nodeChildren.clear();
+            nodeChildren.reserve(childList.size());
             for (const auto& childObj : childList) {
                 py::tuple childTuple = py::cast<py::tuple>(childObj);
                 int distance = py::cast<int>(childTuple[0]);
@@ -176,11 +194,115 @@ public:
                 if (childIndex >= nodes.size()) {
                     throw std::out_of_range("BKTree.from_serializable: child index out of range");
                 }
-                nodes[static_cast<std::size_t>(i)]->children.push_back({distance, nodes[childIndex]});
+                nodeChildren.push_back({distance, nodes[childIndex]});
             }
         }
 
         tree.root = nodes.front();
+        return tree;
+    }
+
+    void save(const std::string& path) const {
+        std::ofstream out(path, std::ios::binary);
+        if (!out) {
+            throw std::runtime_error("BKTree.save: unable to open file for writing");
+        }
+
+        const char magic[8] = {'B', 'K', 'T', 'R', 'E', 'E', '1', 0};
+        out.write(magic, sizeof(magic));
+
+        std::unordered_map<BKNode*, std::uint32_t> index;
+        auto nodes = collectNodes(index);
+        std::uint32_t count = static_cast<std::uint32_t>(nodes.size());
+        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+
+        for (std::uint32_t i = 0; i < count; ++i) {
+            const auto& node = nodes[i];
+            std::uint32_t termLen = static_cast<std::uint32_t>(node->term.size());
+            out.write(reinterpret_cast<const char*>(&termLen), sizeof(termLen));
+            out.write(node->term.data(), termLen);
+
+            std::uint32_t childCount = static_cast<std::uint32_t>(node->children.size());
+            out.write(reinterpret_cast<const char*>(&childCount), sizeof(childCount));
+            for (const auto& child : node->children) {
+                std::uint32_t distance = static_cast<std::uint32_t>(child.first);
+                auto it = index.find(child.second.get());
+                if (it == index.end()) {
+                    throw std::runtime_error("BKTree.save: encountered child without index");
+                }
+                std::uint32_t childIndex = it->second;
+                out.write(reinterpret_cast<const char*>(&distance), sizeof(distance));
+                out.write(reinterpret_cast<const char*>(&childIndex), sizeof(childIndex));
+            }
+        }
+    }
+
+    static BKTree load(const std::string& path) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in) {
+            throw std::runtime_error("BKTree.load: unable to open file for reading");
+        }
+
+        char magic[8];
+        in.read(magic, sizeof(magic));
+        const char expected[8] = {'B', 'K', 'T', 'R', 'E', 'E', '1', 0};
+        if (!in || std::memcmp(magic, expected, sizeof(magic)) != 0) {
+            throw std::runtime_error("BKTree.load: invalid file header");
+        }
+
+        std::uint32_t count = 0;
+        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        if (!in) {
+            throw std::runtime_error("BKTree.load: failed to read node count");
+        }
+
+        std::vector<std::shared_ptr<BKNode>> nodes;
+        nodes.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            nodes.push_back(std::make_shared<BKNode>(std::string()));
+        }
+
+        for (std::uint32_t i = 0; i < count; ++i) {
+            std::uint32_t termLen = 0;
+            in.read(reinterpret_cast<char*>(&termLen), sizeof(termLen));
+            if (!in) {
+                throw std::runtime_error("BKTree.load: failed to read term length");
+            }
+
+            std::string term(termLen, '\0');
+            if (termLen > 0) {
+                in.read(&term[0], termLen);
+            }
+            if (!in) {
+                throw std::runtime_error("BKTree.load: failed to read term data");
+            }
+            nodes[i]->term = std::move(term);
+
+            std::uint32_t childCount = 0;
+            in.read(reinterpret_cast<char*>(&childCount), sizeof(childCount));
+            if (!in) {
+                throw std::runtime_error("BKTree.load: failed to read child count");
+            }
+
+            nodes[i]->children.clear();
+            nodes[i]->children.reserve(childCount);
+            for (std::uint32_t c = 0; c < childCount; ++c) {
+                std::uint32_t distance = 0;
+                std::uint32_t childIndex = 0;
+                in.read(reinterpret_cast<char*>(&distance), sizeof(distance));
+                in.read(reinterpret_cast<char*>(&childIndex), sizeof(childIndex));
+                if (!in) {
+                    throw std::runtime_error("BKTree.load: failed to read child entry");
+                }
+                if (childIndex >= count) {
+                    throw std::runtime_error("BKTree.load: child index out of range");
+                }
+                nodes[i]->children.push_back({static_cast<int>(distance), nodes[childIndex]});
+            }
+        }
+
+        BKTree tree;
+        tree.root = count > 0 ? nodes.front() : nullptr;
         return tree;
     }
 };
@@ -200,9 +322,15 @@ PYBIND11_MODULE(cppmatch, m) {
         .def("search", &BKTree::search, 
            "Search for terms within maxDist of query",
            py::arg("query"), py::arg("maxdist"))
-       .def("to_serializable", &BKTree::to_serializable,
-           "Return a serializable representation of the BK-tree")
-       .def_static("from_serializable", &BKTree::from_serializable,
-           "Reconstruct a BK-tree from a serialized representation",
-           py::arg("data"));
+        .def("to_serializable", &BKTree::to_serializable,
+            "Return a serializable representation of the BK-tree")
+        .def_static("from_serializable", &BKTree::from_serializable,
+            "Reconstruct a BK-tree from serialized data",
+            py::arg("data"))
+       .def("save", &BKTree::save,
+           "Serialize the BK-tree to a binary file",
+           py::arg("path"))
+       .def_static("load", &BKTree::load,
+           "Load a BK-tree from a binary file",
+           py::arg("path"));
 }

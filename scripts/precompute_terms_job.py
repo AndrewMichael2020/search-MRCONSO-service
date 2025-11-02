@@ -5,8 +5,8 @@ This Cloud Run Job performs the following steps:
 1. Download ``MRCONSO.RRF`` (or a compatible cache) from GCS.
 2. Parse the file and construct the BK-tree in memory using the shared ``cppmatch``
     extension.
-3. Serialize the constructed BK-tree to a binary blob (pickle payload).
-4. Upload the artifact back to GCS for later reuse by the serving application.
+3. Serialize the constructed BK-tree to a binary artifact on disk.
+4. Bundle metadata alongside the tree and upload the archive to GCS for reuse.
 5. Emit a JSON summary to stdout before exiting.
 
 Environment variables (overridable via CLI flags):
@@ -23,10 +23,11 @@ import argparse
 import json
 import logging
 import os
-import pickle
+import shutil
 import sys
 import tempfile
 import time
+import tarfile
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,28 +95,34 @@ def _build_bktree(local_path: str, source_format: str, max_terms: int) -> Tuple[
     return tree, term_count
 
 
-def _serialize_tree(tree: app.BKTree, metadata: dict[str, Any]) -> bytes:
-    """Serialize the BK-tree and metadata into a pickle payload."""
+def _package_tree(tree: app.BKTree, metadata: dict[str, Any], work_dir: Path) -> Path:
+    """Persist the BK-tree and metadata locally and return archive path."""
 
-    serialize_start = time.time()
-    payload = {
-        "schema_version": 1,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "metadata": metadata,
-        "nodes": tree.to_serializable(),
-    }
-    blob = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
-    logger.info("Serialized BK-tree in %.2fs (bytes=%d)", time.time() - serialize_start, len(blob))
-    return blob
+    binary_path = work_dir / "bktree.bin"
+    metadata_path = work_dir / "metadata.json"
+    archive_path = work_dir / "mrconso_bktree.tar.gz"
+
+    logger.info("Serializing BK-tree to %s", binary_path)
+    tree.save(str(binary_path))
+
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+
+    logger.info("Creating artifact archive %s", archive_path)
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(binary_path, arcname="bktree.bin")
+        tar.add(metadata_path, arcname="metadata.json")
+
+    return archive_path
 
 
-def _upload_artifact(destination: str, blob: bytes) -> dict[str, Any]:
-    """Persist the serialized BK-tree to the requested destination."""
+def _upload_artifact(destination: str, source_path: Path) -> dict[str, Any]:
+    """Persist the archive to GCS or a local destination."""
 
     upload_start = time.time()
+    size_bytes = source_path.stat().st_size
     info: dict[str, Any] = {
         "destination": destination,
-        "bytes": len(blob),
+        "bytes": size_bytes,
     }
 
     if destination.startswith("gs://"):
@@ -123,15 +130,15 @@ def _upload_artifact(destination: str, blob: bytes) -> dict[str, Any]:
         bucket_name, blob_name = destination.replace("gs://", "", 1).split("/", 1)
         bucket = client.bucket(bucket_name)
         artifact = bucket.blob(blob_name)
-        logger.info("Uploading BK-tree artifact to gs://%s/%s", bucket_name, blob_name)
-        artifact.upload_from_string(blob, content_type="application/octet-stream")
+        logger.info("Uploading artifact to gs://%s/%s", bucket_name, blob_name)
+        artifact.upload_from_filename(str(source_path), content_type="application/gzip")
         info["bucket"] = bucket_name
         info["object"] = blob_name
     else:
         dest_path = Path(destination)
         if dest_path.parent:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
-        dest_path.write_bytes(blob)
+        shutil.copy2(source_path, dest_path)
         info["local_path"] = str(dest_path)
 
     info["upload_seconds"] = round(time.time() - upload_start, 3)
@@ -160,7 +167,6 @@ def main() -> None:
         sys.exit(2)
 
     overall_start = time.time()
-    temp_path: str | None = None
     status = 0
 
     summary: dict[str, Any] = {
@@ -171,23 +177,34 @@ def main() -> None:
     }
 
     try:
-        local_path, should_cleanup = _ensure_local_copy(args.source, args.tmp_dir)
-        if should_cleanup:
-            temp_path = local_path
-        summary["local_source"] = local_path
+        with tempfile.TemporaryDirectory(dir=args.tmp_dir or None, prefix="mrconso_job_") as work_dir_str:
+            work_dir = Path(work_dir_str)
 
-        tree, term_count = _build_bktree(local_path, args.source_format, args.max_terms)
-        summary["term_count"] = term_count
+            local_path, should_cleanup = _ensure_local_copy(args.source, work_dir_str)
+            summary["local_source"] = local_path
 
-        metadata = {
-            "source": args.source,
-            "source_format": args.source_format.lower(),
-            "max_terms": args.max_terms or None,
-            "term_count": term_count,
-        }
-        artifact_blob = _serialize_tree(tree, metadata)
-        summary.update(_upload_artifact(args.artifact, artifact_blob))
-        summary["status"] = "success"
+            tree, term_count = _build_bktree(local_path, args.source_format, args.max_terms)
+            summary["term_count"] = term_count
+
+            metadata = {
+                "schema_version": 1,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "source": args.source,
+                "source_format": args.source_format.lower(),
+                "max_terms": args.max_terms or None,
+                "term_count": term_count,
+                "artifact_type": "tar.gz",
+                "tree_encoding": "bktree.bin",
+            }
+
+            archive_path = _package_tree(tree, metadata, work_dir)
+            summary["archive_path"] = str(archive_path)
+            summary.update(_upload_artifact(args.artifact, archive_path))
+            summary["status"] = "success"
+
+            if should_cleanup:
+                with suppress(Exception):
+                    os.remove(local_path)
     except Exception as exc:  # noqa: BLE001
         logger.exception("BK-tree precomputation failed")
         summary["status"] = "error"
@@ -196,9 +213,6 @@ def main() -> None:
     finally:
         summary["elapsed_seconds"] = round(time.time() - overall_start, 3)
         print(json.dumps(summary, sort_keys=True), flush=True)
-        if temp_path:
-            with suppress(Exception):
-                os.remove(temp_path)
 
     sys.exit(status)
 
