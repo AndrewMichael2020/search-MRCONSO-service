@@ -65,8 +65,19 @@ jobs:
           set -euo pipefail
           gcloud config set project "$GCP_PROJECT_ID"
           gcloud config set run/region "$GCP_REGION"
-          gcloud auth application-default set-quota-project "$GCP_PROJECT_ID"
+          gcloud auth application-default set-quota-project "$GCP_PROJECT_ID" \
+            --credential-file-override "$GOOGLE_APPLICATION_CREDENTIALS"
           gcloud auth list
+
+      - name: Enable required APIs
+        run: |
+          set -euo pipefail
+          gcloud services enable \
+            --project="$GCP_PROJECT_ID" \
+            run.googleapis.com \
+            iamcredentials.googleapis.com \
+            artifactregistry.googleapis.com \
+            cloudresourcemanager.googleapis.com
 
       - name: Configure Docker authentication
         run: |
