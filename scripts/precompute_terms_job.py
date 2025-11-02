@@ -81,7 +81,7 @@ def _build_bktree(local_path: str, source_format: str, max_terms: int) -> Tuple[
     logger.info("Building BK-tree from %s (format=%s)", local_path, app.MRCONSO_FORMAT)
     build_start = time.time()
 
-    with open(local_path, "r", encoding="utf-8", errors="ignore") as handle:
+    with open(local_path, "r", encoding="utf-8", errors="ignore", buffering=1 << 20) as handle:
         for idx, term in enumerate(app._iter_terms(handle), start=1):
             tree.insert(term)
             term_count = idx

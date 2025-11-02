@@ -61,10 +61,10 @@ def _open_mrconso(path: str):
         bucket_name, blob_name = path.replace("gs://", "", 1).split("/", 1)
         blob = client.bucket(bucket_name).blob(blob_name)
         logger.info("Streaming MRCONSO directly from GCS blob gs://%s/%s", bucket_name, blob_name)
-        with blob.open("r", encoding="utf-8", errors="ignore") as fh:
+        with blob.open("r", encoding="utf-8", errors="ignore", chunk_size=1 << 20) as fh:
             yield fh
     else:
-        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+        with open(path, "r", encoding="utf-8", errors="ignore", buffering=1 << 20) as fh:
             yield fh
 
 
