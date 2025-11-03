@@ -1,0 +1,151 @@
+name: Deploy to Cloud Run (staging)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: cloud-run-staging-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+
+  deploy-staging:
+    needs: tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ secrets.GCP_REGION }}
+      SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
+      SERVICE_NAME_STAGING: ${{ secrets.SERVICE_NAME_STAGING }}
+      GCP_ARTIFACT_REPO: ${{ secrets.GCP_ARTIFACT_REPO }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+      MRCONSO_PATH: ${{ secrets.MRCONSO_PATH }}
+      GCP_LOG_LEVEL: ${{ secrets.GCP_LOG_LEVEL }}
+      # Staging tunables (override via repo variables)
+      STAGING_ENABLE_PYTHON_BASELINE: '${{ vars.STAGING_ENABLE_PYTHON_BASELINE }}'
+      STAGING_AUTO_LOAD_ON_STARTUP: '${{ vars.STAGING_AUTO_LOAD_ON_STARTUP }}'
+      STAGING_CLOUD_RUN_MEMORY: '${{ vars.STAGING_CLOUD_RUN_MEMORY }}'
+      STAGING_CLOUD_RUN_CPU: '${{ vars.STAGING_CLOUD_RUN_CPU }}'
+      STAGING_CLOUD_RUN_TIMEOUT: '${{ vars.STAGING_CLOUD_RUN_TIMEOUT }}'
+      STAGING_MIN_INSTANCES: '${{ vars.STAGING_MIN_INSTANCES }}'
+      STAGING_MAX_INSTANCES: '${{ vars.STAGING_MAX_INSTANCES }}'
+      STAGING_MAX_TERMS: '${{ vars.STAGING_MAX_TERMS }}'
+      STAGING_SHUTDOWN_AFTER_SECONDS: '${{ vars.STAGING_SHUTDOWN_AFTER_SECONDS }}'
+      STAGING_MRCONSO_FORMAT: '${{ vars.STAGING_MRCONSO_FORMAT }}'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          : "${GCP_PROJECT_ID:?Set the GCP_PROJECT_ID secret}"
+          : "${GCP_REGION:?Set the GCP_REGION secret}"
+          : "${SERVICE_NAME:?Set the SERVICE_NAME secret}"
+          : "${GCP_ARTIFACT_REPO:?Set the GCP_ARTIFACT_REPO secret (Artifact Registry repo)}"
+          : "${GCP_WORKLOAD_IDENTITY_PROVIDER:?Set the GCP_WORKLOAD_IDENTITY_PROVIDER secret}"
+          : "${GCP_SA_EMAIL:?Set the GCP_SA_EMAIL secret}"
+          : "${MRCONSO_PATH:?Set the MRCONSO_PATH secret (gs:// path to MRCONSO.RRF)}"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SA_EMAIL }}
+          token_format: access_token
+          access_token_lifetime: 900s
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure gcloud defaults
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ steps.auth.outputs.credentials_file_path }}
+        run: |
+          set -euo pipefail
+          export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$GOOGLE_APPLICATION_CREDENTIALS"
+          gcloud auth login --cred-file="$GOOGLE_APPLICATION_CREDENTIALS" --brief
+          gcloud config set project "$GCP_PROJECT_ID"
+          gcloud config set run/region "$GCP_REGION"
+          gcloud auth list
+
+      - name: Enable required APIs
+        env:
+          CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: ${{ steps.auth.outputs.credentials_file_path }}
+        run: |
+          set -euo pipefail
+          gcloud services enable \
+            --project="$GCP_PROJECT_ID" \
+            run.googleapis.com \
+            iamcredentials.googleapis.com \
+            artifactregistry.googleapis.com \
+            cloudresourcemanager.googleapis.com
+
+      - name: Configure Docker authentication
+        run: |
+          set -euo pipefail
+          REGISTRY_HOST="${GCP_ARTIFACT_REPO%%/*}"
+          gcloud --quiet auth configure-docker "$REGISTRY_HOST"
+
+      - name: Build and push image
+        env:
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          IMAGE="$GCP_ARTIFACT_REPO/${SERVICE_NAME}-staging:$IMAGE_TAG"
+          echo "Building $IMAGE"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+        id: build
+
+      - name: Deploy to Cloud Run (staging)
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          LOG_LEVEL_VALUE="${GCP_LOG_LEVEL:-INFO}"
+          BASE_NAME_VALUE="${SERVICE_NAME}"
+          SERVICE_NAME_VALUE="${SERVICE_NAME_STAGING:-${BASE_NAME_VALUE}-staging}"
+          MEMORY_VALUE="${STAGING_CLOUD_RUN_MEMORY:-8Gi}"
+          CPU_VALUE="${STAGING_CLOUD_RUN_CPU:-2}"
+          TIMEOUT_VALUE="${STAGING_CLOUD_RUN_TIMEOUT:-600}"
+          MIN_INSTANCES_VALUE="${STAGING_MIN_INSTANCES:-1}"
+          MAX_INSTANCES_VALUE="${STAGING_MAX_INSTANCES:-1}"
+          BASELINE_VALUE="${STAGING_ENABLE_PYTHON_BASELINE:-true}"
+          AUTO_LOAD_VALUE="${STAGING_AUTO_LOAD_ON_STARTUP:-true}"
+          MRCONSO_FORMAT_VALUE="${STAGING_MRCONSO_FORMAT:-rrf}"
+          SHUTDOWN_VALUE="${STAGING_SHUTDOWN_AFTER_SECONDS:-0}"
+          MAX_TERMS_VALUE="${STAGING_MAX_TERMS:-50000}"
+          ARTIFACT_VALUE=""  # force empty to populate TERMS for baseline
+
+          gcloud run deploy "$SERVICE_NAME_VALUE" \
+            --image "$IMAGE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --platform managed \
+            --memory "$MEMORY_VALUE" \
+            --cpu "$CPU_VALUE" \
+            --min-instances "$MIN_INSTANCES_VALUE" \
+            --max-instances "$MAX_INSTANCES_VALUE" \
+            --timeout "$TIMEOUT_VALUE" \
+            --allow-unauthenticated \
+            --set-env-vars "MRCONSO_PATH=$MRCONSO_PATH,LOG_LEVEL=$LOG_LEVEL_VALUE,DEPLOY_ENV=staging,ENABLE_PYTHON_BASELINE=$BASELINE_VALUE,AUTO_LOAD_ON_STARTUP=$AUTO_LOAD_VALUE,MRCONSO_FORMAT=$MRCONSO_FORMAT_VALUE,SHUTDOWN_AFTER_SECONDS=$SHUTDOWN_VALUE,BKTREE_ARTIFACT_PATH=$ARTIFACT_VALUE,MAX_TERMS=$MAX_TERMS_VALUE"
+
+      - name: Show staging service URL
+        run: |
+          set -euo pipefail
+          SERVICE_NAME_VALUE="${SERVICE_NAME_STAGING:-${SERVICE_NAME}-staging}"
+          gcloud run services describe "$SERVICE_NAME_VALUE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --format='value(status.url)'
