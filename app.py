@@ -316,6 +316,7 @@ def _schedule_shutdown_timer() -> None:
 
     async def _shutdown_worker():
         try:
+            logger.info("Scheduling auto shutdown in %d seconds", SHUTDOWN_AFTER_SECONDS)
             await asyncio.sleep(SHUTDOWN_AFTER_SECONDS)
             logger.warning("Auto shutdown triggered after %d seconds", SHUTDOWN_AFTER_SECONDS)
             os._exit(0)

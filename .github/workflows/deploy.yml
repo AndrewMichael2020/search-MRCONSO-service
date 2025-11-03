@@ -127,7 +127,7 @@ jobs:
           AUTO_LOAD_VALUE="${AUTO_LOAD_ON_STARTUP:-false}"
           MRCONSO_FORMAT_VALUE="${MRCONSO_FORMAT:-rrf}"
           # Default to 0 (disabled) so revisions don't auto-exit unless explicitly requested
-          SHUTDOWN_VALUE="${SHUTDOWN_AFTER_SECONDS:-2000}"
+          SHUTDOWN_VALUE="${SHUTDOWN_AFTER_SECONDS:-0}"
           ARTIFACT_VALUE="${BKTREE_ARTIFACT_PATH:-}"
           MAX_TERMS_VALUE="${MAX_TERMS:-}"
           gcloud run deploy "$SERVICE_NAME" \
