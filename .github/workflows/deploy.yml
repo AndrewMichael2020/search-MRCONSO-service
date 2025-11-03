@@ -123,13 +123,17 @@ jobs:
           TIMEOUT_VALUE="${CLOUD_RUN_TIMEOUT:-600}"
           MIN_INSTANCES_VALUE="${CLOUD_RUN_MIN_INSTANCES:-1}"
           MAX_INSTANCES_VALUE="${CLOUD_RUN_MAX_INSTANCES:-1}"
-          BASELINE_VALUE="${ENABLE_PYTHON_BASELINE:-false}"
-          AUTO_LOAD_VALUE="${AUTO_LOAD_ON_STARTUP:-false}"
+          # Enable baseline for A/B testing (Python vs C++)
+          BASELINE_VALUE="${ENABLE_PYTHON_BASELINE:-true}"
+          # Auto-load MRCONSO on startup
+          AUTO_LOAD_VALUE="${AUTO_LOAD_ON_STARTUP:-true}"
           MRCONSO_FORMAT_VALUE="${MRCONSO_FORMAT:-rrf}"
           # Default to 0 (disabled) so revisions don't auto-exit unless explicitly requested
           SHUTDOWN_VALUE="${SHUTDOWN_AFTER_SECONDS:-0}"
-          ARTIFACT_VALUE="${BKTREE_ARTIFACT_PATH:-}"
-          MAX_TERMS_VALUE="${MAX_TERMS:-}"
+          # Force artifact empty to populate TERMS for baseline comparison
+          ARTIFACT_VALUE=""
+          # Cap at 50k terms for memory-safe A/B testing
+          MAX_TERMS_VALUE="${MAX_TERMS:-50000}"
           gcloud run deploy "$SERVICE_NAME" \
             --image "$IMAGE" \
             --project "$GCP_PROJECT_ID" \

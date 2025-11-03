@@ -330,8 +330,10 @@ def _schedule_shutdown_timer() -> None:
 async def _lifespan_handler(_: FastAPI):
     global _shutdown_task
     if AUTO_LOAD_ON_STARTUP:
-        logger.info("AUTO_LOAD_ON_STARTUP=1: starting MRCONSO load in background")
+        logger.info("AUTO_LOAD_ON_STARTUP=true: starting MRCONSO load in background")
         asyncio.create_task(_background_load_wrapper())
+    else:
+        logger.info("AUTO_LOAD_ON_STARTUP=false: skipping automatic load; call POST /load to load MRCONSO")
 
     try:
         yield
