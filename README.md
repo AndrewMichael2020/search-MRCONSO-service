@@ -162,10 +162,11 @@ See [docs/INSTRUCTIONS.md](docs/INSTRUCTIONS.md) for complete architecture detai
 
 ```mermaid
 flowchart TD
-  A[MRCONSO source\n(RRF or terms; local path or gs://)] --> B[Loader]
+  A[MRCONSO source<br/>(RRF or terms; local path or gs://)] --> B[Loader]
   B --> C[C++ BK-tree index]
-  B --> D[Python baseline\n(terms list)]
-  C & D --> E[FastAPI endpoints\n/search/bktree, /search/python]
+  B --> D[Python baseline (terms list)]
+  C --> E[FastAPI endpoints<br/>/search/bktree, /search/python]
+  D --> E
   E --> F[Cloud Run deployment]
 
   subgraph Config
@@ -174,7 +175,10 @@ flowchart TD
     X3[AUTO_LOAD_ON_STARTUP]
     X4[MAX_TERMS / MRCONSO_FORMAT]
   end
-  Config -. controls .-> B
+  X1 --> B
+  X2 --> B
+  X3 --> B
+  X4 --> B
 ```
 
 ## 🌐 Try it on Cloud Run
