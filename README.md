@@ -105,7 +105,7 @@ For larger, reportable runs, use the harness in `scripts/massive_benchmark.py`.
   # 50k terms, 1k queries
   PYTHONPATH=. python scripts/massive_benchmark.py local \
     --terms data/umls/2025AA/MRCONSO.RRF \
-    --limit-terms 50000 \
+    --limit-terms 500000 \
     --queries 1000 --maxdist 1 \
     --out-json docs/reports/local_mrconso_50k.json
   ```
