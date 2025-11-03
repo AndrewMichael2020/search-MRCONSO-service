@@ -37,7 +37,9 @@ ENABLE_PYTHON_BASELINE = _parse_bool(os.getenv("ENABLE_PYTHON_BASELINE"), defaul
 AUTO_LOAD_ON_STARTUP = _parse_bool(os.getenv("AUTO_LOAD_ON_STARTUP"))
 MRCONSO_FORMAT = os.getenv("MRCONSO_FORMAT", "rrf").lower()
 SHUTDOWN_AFTER_SECONDS = int(os.getenv("SHUTDOWN_AFTER_SECONDS", "0") or 0) or None
-BKTREE_ARTIFACT_PATH = os.getenv("BKTREE_ARTIFACT_PATH")
+# Normalize artifact path: treat missing or whitespace-only as None to avoid false positives
+_ART_RAW = os.getenv("BKTREE_ARTIFACT_PATH", "")
+BKTREE_ARTIFACT_PATH = (_ART_RAW.strip() or None)
 CANONICAL_BASE_URL = os.getenv("CANONICAL_BASE_URL", "").strip()
 
 TERMS: list[str] = []
