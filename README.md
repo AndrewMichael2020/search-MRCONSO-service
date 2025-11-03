@@ -13,6 +13,89 @@
 
 A performance comparison demo between a compiled **C++ BK-tree** (via pybind11) and **pure-Python Levenshtein** search across MRCONSO-like medical terminology. Includes a FastAPI service deployable to Google Cloud Run.
 
+---
+
+## 📖 In Plain Language: Why This Matters
+
+### The Problem We're Solving
+
+Medical terminology databases like **MRCONSO** (from UMLS) contain millions of terms—drug names, disease names, procedure codes, and their variations. 
+
+UMLS stands for Unified Medical Language System. It’s a large collection of biomedical vocabularies and standards maintained by the U.S. National Library of Medicine (NLM). It provides a framework for integrating and mapping between medical terminologies such as SNOMED CT / SNOMED CA, ICD-10/ICD-10-CA, LOINC, RxNorm, and others. Together, UMLS enables consistent meaning and interoperability across diverse healthcare data systems.
+
+The MRCONSO table (short for Metathesaurus Concept Names and Sources) within UMLS stores:
+
+- Concept unique identifiers (CUI),
+
+- Source vocabulary identifiers (SAB),
+
+- Language codes, and
+
+- Preferred terms, synonyms, and lexical variants (STR).
+
+When a user searches for "carditis" (inflammation of the heart), we want to find not just exact matches, but also **near-matches** like:
+
+- "Cardiitis" (common misspelling, 1 character different)
+- "Carditis NOS" (variant with qualifier)
+- Similar terms the user might have meant
+
+This is called **fuzzy matching** or **approximate string matching**. It's essential because:
+- Users make typos,
+- Medical terms have many variations and synonyms, or 
+- Exact matching misses 80%+ of relevant results.
+
+### How We Measure "Closeness": Levenshtein Distance
+
+We use **Levenshtein distance** to measure how different two words are. It counts the minimum number of single-character edits (insert, delete, substitute) needed to change one word into another:
+
+- "carditis" → "Carditis" = **0 edits** (case-insensitive match)
+- "carditis" → "cardiitis" = **1 edit** (insert one 'i')
+- "carditis" → "arthritis" = **4 edits** (too different)
+
+When a user searches for "carditis" with a tolerance of 1 edit, we return all terms within distance 1.
+
+### Two Approaches, Different Speeds
+
+#### **Python Baseline (Simple but Slow)**
+- **What it does:** Compares the search term to *every single term* in the database, one by one
+- **Analogy:** Like checking every book in a library by hand
+- **Speed:** For 50,000 terms, this takes ~140ms per search
+- **Problem:** Doesn't scale—doubling the database size doubles the search time
+
+#### **BK-tree (Smart Data Structure, Much Faster)**
+- **What it does:** Organizes terms into a tree structure that lets us skip large chunks of irrelevant terms
+- **Analogy:** Like using a library's card catalog to jump directly to the right shelf
+- **Speed:** For 50,000 terms, this takes ~2ms per search (69× faster!)
+- **C++ Implementation:** We use C++ because it's a compiled language that runs much faster than interpreted Python for this kind of heavy computation
+
+There are other search implementations (e.g., tries, VP-trees), but BK-trees are just one example that is a great fit for Levenshtein distance and fuzzy matching.
+
+### Why We Built This Test
+
+**Question:** Is it worth the extra complexity of using C++ instead of pure Python?
+
+**Answer:** Yes—but we wanted **proof with real numbers**, not just theory:
+
+1. **Speed Under Load:** Our tests show the C++ BK-tree handles **220 searches per second** on Cloud Run, while Python tops out at **37 searches/second** (5.9× slower)
+2. **Scalability:** C++ performance improves with more concurrent users; Python hits a hard ceiling
+3. **Latency Consistency:** C++ maintains ~80-220ms response times even at high load; Python latency balloons to 1.3+ seconds
+
+### Bottom Line in Plain Language
+
+If you're building a tool that:
+- Searches large medical terminology databases
+- Needs to handle multiple users at once
+- Requires sub-second response times
+
+...then investing in a BK-tree with C++ acceleration pays off. This repository provides:
+- ✅ Working code you can deploy immediately (Docker + Cloud Run)
+- ✅ Reproducible benchmarks showing real-world performance
+- ✅ Side-by-side API endpoints so you can test both approaches yourself
+
+**No C++ knowledge required to use it**—just deploy to Cloud Run and call the REST API from your analytics tools (R, Python, Tableau, etc.).
+
+---
+
 ## 🎯 What This Does
 
 - **Parses** MRCONSO-like pipe-delimited term files
