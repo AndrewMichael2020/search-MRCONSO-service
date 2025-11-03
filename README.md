@@ -1,6 +1,15 @@
 # BK-tree vs Python Fuzzy Search (MRCONSO)
 
-[![Test](https://github.com/AndrewMichael2020/search-MRCONSO-service/actions/workflows/test.yml/badge.svg)](https://github.com/AndrewMichael2020/search-MRCONSO-service/actions/workflows/test.yml)
+[![Tests](https://github.com/AndrewMichael2020/search-MRCONSO-service/actions/workflows/tests.yml/badge.svg)](https://github.com/AndrewMichael2020/search-MRCONSO-service/actions/workflows/tests.yml)
+[![Deploy to Cloud Run](https://github.com/AndrewMichael2020/search-MRCONSO-service/actions/workflows/deploy.yml/badge.svg)](https://github.com/AndrewMichael2020/search-MRCONSO-service/actions/workflows/deploy.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![C++11](https://img.shields.io/badge/C%2B%2B-11-00599C?logo=c%2B%2B&logoColor=white)](./cppmatch.cpp)
+[![Dockerized](https://img.shields.io/badge/container-Docker-2496ED?logo=docker&logoColor=white)](./Dockerfile)
+[![Cloud Run](https://img.shields.io/badge/GCP-Cloud%20Run-4285F4?logo=google-cloud&logoColor=white)](https://cloud.google.com/run)
+[![Last commit](https://img.shields.io/github/last-commit/AndrewMichael2020/search-MRCONSO-service)](https://github.com/AndrewMichael2020/search-MRCONSO-service/commits)
+[![Open issues](https://img.shields.io/github/issues/AndrewMichael2020/search-MRCONSO-service)](https://github.com/AndrewMichael2020/search-MRCONSO-service/issues)
 
 A performance comparison demo between a compiled **C++ BK-tree** (via pybind11) and **pure-Python Levenshtein** search across MRCONSO-like medical terminology. Includes a FastAPI service deployable to Google Cloud Run.
 
