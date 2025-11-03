@@ -93,28 +93,57 @@ curl "http://localhost:8080/search/bktree?q=carditis&max_dist=1&k=5"
 
 ## 📊 Benchmark Results
 
-These are real numbers from our runs. Your mileage may vary by machine, term count, and deployment shape.
+Real-world performance comparison between C++ BK-tree and Python baseline on 50,000 MRCONSO terms. **TL;DR: C++ is 5–6× faster on Cloud Run and 70× faster locally.**
 
-### Cloud Run (BK-tree endpoint)
+### Cloud Run Performance (50k terms, maxdist=1)
 
-- 2,000 queries, concurrency 25, maxdist=1
-  - Requests/sec: ~61.8
-  - Latency p95: ~456 ms (HTTP/1.1)
-  - Success: 100%
+#### C++ BK-tree (`/search/bktree`)
 
-- Smoke: 100 queries, concurrency 10
-  - Avg latency: ~170 ms
-  - Requests/sec: ~56
-  - Success: 100%
+| Concurrency | Queries | RPS | Avg Latency | p95 Latency | p99 Latency | Success |
+|-------------|---------|-----|-------------|-------------|-------------|---------|
+| 10 | 2,000 | **121.7** | 81.7 ms | 85.7 ms | 89.0 ms | 100% |
+| 25 | 2,000 | **199.0** | 123.5 ms | 171.9 ms | 197.6 ms | 100% |
+| **50** | **2,000** | **220.2** | **219.6 ms** | **277.1 ms** | **302.2 ms** | **100%** |
+| 25 | 5,000 | **191.3** | 129.0 ms | 168.4 ms | 269.6 ms | 100% |
 
-Note: The Python baseline endpoint is intentionally disabled in production. Hitting `/search/python` on prod will return 503.
+**Key findings:**
+- ✅ **Scales beautifully** with concurrency (10→25→50)
+- ✅ **Peak throughput**: 220 requests/sec at c=50
+- ✅ **Consistent performance** across different query loads
+- ✅ **Low latency** even under heavy load (avg < 220ms at c=50)
+
+#### Python baseline (`/search/python`)
+
+| Concurrency | Queries | RPS | Avg Latency | p95 Latency | p99 Latency | Success |
+|-------------|---------|-----|-------------|-------------|-------------|---------|
+| 25 | 2,000 | **36.7** | 676.8 ms | 722.7 ms | 862.1 ms | 100% |
+| **50** | **2,000** | **37.2** | **1328.7 ms** | **1383.3 ms** | **1404.1 ms** | **100%** |
+
+**Key findings:**
+- ⚠️ **Does NOT scale** with concurrency (RPS plateaus at ~37)
+- ⚠️ **Latency doubles** under load (677ms → 1329ms at c=50)
+- ⚠️ **Single-threaded bottleneck** (sequential scan through all terms)
+
+#### Head-to-Head Comparison
+
+**At concurrency 25:**
+- C++ is **5.4× faster** in throughput (199 RPS vs 37 RPS)
+- C++ has **5.5× lower latency** (124ms vs 677ms avg)
+
+**At concurrency 50:**
+- C++ is **5.9× faster** in throughput (220 RPS vs 37 RPS)
+- C++ has **6.1× lower latency** (220ms vs 1329ms avg)
+
+**The performance gap widens under load!** The C++ BK-tree scales gracefully with concurrency, while the Python baseline hits a hard ceiling and latency degrades badly.
 
 ### Local (Codespaces, in-process engine)
 
 - Dataset: ~50,000 terms, 1,000 queries, maxdist=1
   - BK-tree: 0.284 s total (≈3519 QPS)
   - Python baseline: 19.777 s total (≈50.6 QPS)
-  - Speedup (Python/BK-tree): ~69.6×
+  - **Speedup: 69.6×** (Python/BK-tree)
+
+The local speedup is even more dramatic because there's no HTTP overhead—just raw algorithm performance.
 
 Run `python benchmark.py` for a quick check, or use the harness below for larger, reproducible runs.
 
