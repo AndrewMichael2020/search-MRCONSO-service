@@ -85,6 +85,33 @@ curl -X POST http://localhost:8080/search/bktree \
 
 Run `python benchmark.py` or call `/benchmarks/run` endpoint to fill in results.
 
+### Massive-ish Benchmarks
+
+For larger, reportable runs, use the harness in `scripts/massive_benchmark.py`.
+
+- Remote (deployed service, async HTTP load):
+
+  ```bash
+  # 2k queries, concurrency 25, maxdist=1
+  python scripts/massive_benchmark.py remote \
+    --base-url https://YOUR-SERVICE-URL \
+    --queries 2000 --concurrency 25 --maxdist 1 \
+    --out-json docs/reports/remote_2k_c25.json
+  ```
+
+- Local (in-process C++ BKTree vs Python baseline):
+
+  ```bash
+  # 50k terms, 1k queries
+  PYTHONPATH=. python scripts/massive_benchmark.py local \
+    --terms data/umls/2025AA/MRCONSO.RRF \
+    --limit-terms 50000 \
+    --queries 1000 --maxdist 1 \
+    --out-json docs/reports/local_mrconso_50k.json
+  ```
+
+The harness prints a JSON summary (RPS and latency percentiles for remote; build time, QPS, and Python/BK speedup for local) and writes it to the path you provide.
+
 ## 🧪 Testing
 
 ```bash

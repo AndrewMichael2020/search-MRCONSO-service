@@ -97,3 +97,7 @@ data/mrconso_sample.txt
 # Only .gitkeep is tracked to preserve directory structure
 docs/reports/*
 !docs/reports/.gitkeep
+
+*.tar.gz
+*.bin
+metadata.json

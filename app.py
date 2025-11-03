@@ -13,10 +13,13 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Iterable, Iterator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from cppmatch import BKTree
 from rapidfuzz.distance import Levenshtein
+from starlette.middleware.base import BaseHTTPMiddleware
+from fastapi.responses import RedirectResponse
+from urllib.parse import urlparse, urlunparse
 
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -35,6 +38,7 @@ AUTO_LOAD_ON_STARTUP = _parse_bool(os.getenv("AUTO_LOAD_ON_STARTUP"))
 MRCONSO_FORMAT = os.getenv("MRCONSO_FORMAT", "rrf").lower()
 SHUTDOWN_AFTER_SECONDS = int(os.getenv("SHUTDOWN_AFTER_SECONDS", "0") or 0) or None
 BKTREE_ARTIFACT_PATH = os.getenv("BKTREE_ARTIFACT_PATH")
+CANONICAL_BASE_URL = os.getenv("CANONICAL_BASE_URL", "").strip()
 
 TERMS: list[str] = []
 TREE = BKTree()
@@ -69,7 +73,11 @@ def _open_mrconso(path: str):
 
 
 def _ensure_local_artifact(path: str) -> tuple[Path, bool]:
-    """Ensure the BK-tree artifact exists locally; download from GCS if required."""
+    """Ensure the BK-tree artifact exists locally; download from GCS if required.
+
+    Prefers a RAM-backed tmp directory if available to avoid filling /tmp on Cloud Run.
+    Returns (local_path, should_cleanup).
+    """
 
     if not path.startswith("gs://"):
         return Path(path), False
@@ -80,37 +88,91 @@ def _ensure_local_artifact(path: str) -> tuple[Path, bool]:
     bucket_name, blob_name = path.replace("gs://", "", 1).split("/", 1)
     blob = client.bucket(bucket_name).blob(blob_name)
 
-    tmp_dir = Path(tempfile.gettempdir())
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(prefix="bktree_artifact_", suffix=".tar.gz", delete=False)
+    # Choose target tmp dir: prefer BK_TMP_DIR if explicitly provided and writable,
+    # otherwise default to the system temp dir (typically /tmp on Cloud Run).
+    preferred_tmp = os.getenv("BK_TMP_DIR")
+    tmp_root = Path(preferred_tmp) if preferred_tmp else Path(tempfile.gettempdir())
+    if not tmp_root.exists() or not os.access(tmp_root, os.W_OK):
+        tmp_root = Path(tempfile.gettempdir())
+    tmp_root.mkdir(parents=True, exist_ok=True)
+
+    handle = tempfile.NamedTemporaryFile(prefix="bktree_artifact_", suffix=".tar.gz", delete=False, dir=tmp_root)
     handle.close()
     tmp_path = Path(handle.name)
 
     logger.info("Downloading BK-tree artifact from gs://%s/%s to %s", bucket_name, blob_name, tmp_path)
-    blob.download_to_filename(handle.name)
+    start = time.time()
+    blob.download_to_filename(tmp_path.as_posix())
+    try:
+        size_mb = tmp_path.stat().st_size / (1024 * 1024)
+    except Exception:
+        size_mb = -1
+    logger.info("Finished downloading BK-tree artifact (%.2f MB) in %.2fs", size_mb, time.time() - start)
     return tmp_path, True
 
 
 def _load_bktree_artifact(path: str) -> tuple[BKTree, dict[str, Any]]:
-    """Load a serialized BK-tree from a tar.gz artifact and return (tree, metadata)."""
+    """Load a serialized BK-tree from a tar.gz artifact and return (tree, metadata).
+
+    Stream-extracts only the required members and writes the large binary into a RAM-backed
+    directory when possible to avoid exhausting /tmp disk.
+    """
 
     local_path, should_cleanup = _ensure_local_artifact(path)
     metadata: dict[str, Any]
+    tree_path: Path | None = None
     try:
-        with tarfile.open(local_path, "r:gz") as tar, tempfile.TemporaryDirectory(prefix="bktree_extract_") as tmp_dir:
-            tmp_base = Path(tmp_dir)
-            tar.extractall(tmp_base)
-
-            metadata_path = tmp_base / "metadata.json"
-            tree_path = tmp_base / "bktree.bin"
-
-            if not metadata_path.exists() or not tree_path.exists():
+        logger.info("Opening artifact tar %s", local_path)
+        with tarfile.open(local_path, "r:gz") as tar:
+            names = set(tar.getnames())
+            if "metadata.json" not in names or "bktree.bin" not in names:
                 raise RuntimeError("BK-tree artifact missing required files")
 
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            tree = BKTree.load(str(tree_path))
-            return tree, metadata
+            with tar.extractfile("metadata.json") as mfh:
+                if mfh is None:
+                    raise RuntimeError("Failed to extract metadata.json from artifact")
+                metadata = json.loads(mfh.read().decode("utf-8"))
+            logger.info("Read artifact metadata: term_count=%s", metadata.get("term_count"))
+
+            preferred_tmp = os.getenv("BK_TMP_DIR")
+            tmp_root = Path(preferred_tmp) if preferred_tmp else Path(tempfile.gettempdir())
+            if not tmp_root.exists() or not os.access(tmp_root, os.W_OK):
+                tmp_root = Path(tempfile.gettempdir())
+            tmp_root.mkdir(parents=True, exist_ok=True)
+
+            handle = tempfile.NamedTemporaryFile(prefix="bktree_", suffix=".bin", delete=False, dir=tmp_root)
+            handle.close()
+            tree_path = Path(handle.name)
+            logger.info("Extracting bktree.bin to %s", tree_path)
+
+            copied = 0
+            with tar.extractfile("bktree.bin") as src, open(tree_path, "wb", buffering=1 << 20) as dst:
+                if src is None:
+                    raise RuntimeError("Failed to extract bktree.bin from artifact")
+                while True:
+                    chunk = src.read(16 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                    copied += len(chunk)
+                    if copied % (512 * 1024 * 1024) < len(chunk):
+                        logger.info("...extracted %.1f GiB", copied / (1024**3))
+            try:
+                size_gb = tree_path.stat().st_size / (1024**3)
+            except Exception:
+                size_gb = -1
+            logger.info("Finished extracting bktree.bin (%.2f GiB)", size_gb)
+
+        logger.info("Loading BK-tree from %s ...", tree_path)
+        start = time.time()
+        tree = BKTree.load(str(tree_path))
+        logger.info("BK-tree binary loaded in %.2fs", time.time() - start)
+        return tree, metadata
     finally:
+        # Best-effort cleanup of large temp files
+        with suppress(Exception):
+            if tree_path and tree_path.exists():
+                tree_path.unlink()
         if should_cleanup:
             with suppress(Exception):
                 local_path.unlink()
@@ -289,6 +351,40 @@ app = FastAPI(
 # Explicitly disable slash-redirects in case upstream FastAPI ignores the constructor flag.
 app.router.redirect_slashes = False
 
+# Canonical host redirection (optional; enabled only if CANONICAL_BASE_URL is set)
+if CANONICAL_BASE_URL:
+    parsed = urlparse(CANONICAL_BASE_URL)
+    CANONICAL_NETLOC = parsed.netloc
+    CANONICAL_SCHEME = parsed.scheme or "https"
+
+    class _CanonicalHostMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            # Prefer X-Forwarded-Host/Proto when present (Cloud Run, proxies)
+            fwd_host = request.headers.get("x-forwarded-host")
+            fwd_proto = request.headers.get("x-forwarded-proto") or CANONICAL_SCHEME
+
+            current_host = (fwd_host or request.url.hostname or "").lower()
+            target_host = CANONICAL_NETLOC.lower()
+
+            # Skip redirect if host already canonical or host unavailable (internal probes)
+            if not current_host or current_host == target_host:
+                return await call_next(request)
+
+            # Build redirected absolute URL preserving path and query
+            new_url = urlunparse(
+                (
+                    CANONICAL_SCHEME,
+                    CANONICAL_NETLOC,
+                    request.url.path,
+                    "",
+                    request.url.query,
+                    "",
+                )
+            )
+            return RedirectResponse(url=new_url, status_code=308)
+
+    app.add_middleware(_CanonicalHostMiddleware)
+
 
 @app.get("/healthz")
 @app.get("/healthz/")
@@ -329,6 +425,23 @@ async def search_bktree(req: SearchReq):
     return {"matches": [{"term": t, "distance": d} for t, d in res]}
 
 
+@app.get("/search/bktree")
+async def search_bktree_get(q: str, max_dist: int = 1, k: int | None = None):
+    """Convenience GET endpoint for CLI users.
+
+    Query params:
+    - q: the query string
+    - max_dist: maximum Levenshtein distance (alias for maxdist)
+    - k: optional top-k results to return
+    """
+    if not LOADED:
+        raise HTTPException(503, "Terms not loaded yet")
+    results = TREE.search(q, max_dist)
+    if k is not None and k >= 0:
+        results = results[:k]
+    return {"matches": [{"term": t, "distance": d} for t, d in results]}
+
+
 @app.post("/search/python")
 async def search_python(req: SearchReq):
     if not ENABLE_PYTHON_BASELINE:
@@ -337,6 +450,22 @@ async def search_python(req: SearchReq):
         raise HTTPException(503, "Terms not loaded yet")
     best = min(TERMS, key=lambda t: Levenshtein.distance(req.query, t))
     dist = int(Levenshtein.distance(req.query, best))
+    return {"matches": [{"term": best, "distance": dist}]}
+
+
+@app.get("/search/python")
+async def search_python_get(q: str):
+    """Convenience GET variant for baseline search.
+
+    Note: This will return 503 in production when baseline is disabled or when
+    running with a pre-built BK-tree artifact (TERMS list not populated).
+    """
+    if not ENABLE_PYTHON_BASELINE:
+        raise HTTPException(503, "Python baseline disabled (ENABLE_PYTHON_BASELINE=0)")
+    if not LOADED or not TERMS:
+        raise HTTPException(503, "Terms not loaded yet")
+    best = min(TERMS, key=lambda t: Levenshtein.distance(q, t))
+    dist = int(Levenshtein.distance(q, best))
     return {"matches": [{"term": best, "distance": dist}]}
 
 
